@@ -31,7 +31,7 @@ def run_experiment_stats_weighted(
     seed=0
 ):
     methods = [
-        "worst-case"
+        "worst-case",
         "optimal",
         "LP",
         "Dual-Primal",

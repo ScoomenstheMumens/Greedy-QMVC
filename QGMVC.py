@@ -31,7 +31,7 @@ def run_experiment_stats_weighted(
     seed=0
 ):
     methods = [
-        "worst-case",
+        "worst_case",
         "optimal",
         "LP",
         "Dual-Primal",
@@ -76,16 +76,16 @@ def run_experiment_stats_weighted(
             if case == "unweighted":
                 c = {i: 1.0 for i in G.nodes()}
             else:
-                c = {i: random.uniform(0.25, 0.75) for i in G.nodes()}
+                c = {i: random.uniform(0.40, 0.70) for i in G.nodes()}
 
             C_opt = mvc_exact_cplex(G, c)
             opt_cost = sum(c[i] for i in C_opt)
             results[n]["optimal"].append(opt_cost)  # by definition
 
-            results[n]["worst-case"].append(sum(c[i] for i in G.nodes()))
+            results[n]["worst_case"].append(sum(c[i] for i in G.nodes())/opt_cost)
 
             C_lp = mvc_lp_relaxation(G, c)
-            results[n]["LP"].append(sum(c[i] for i in C_lp) / opt_cost)
+            results[n]["LP"].append((sum(c[i] for i in C_lp) )/ opt_cost)
 
             C_pd = mvc_primal_dual_weighted(G,  c)
             results[n]["Dual-Primal"].append(sum(c[i] for i in C_pd) / opt_cost)
@@ -106,21 +106,21 @@ def run_experiment_stats_weighted(
             for _ in range(n_stat):
 
                 c_ge = greedy_edge_vertex_cover(G,c)
-                C_ge.append(sum(c[i] for i in c_ge) / opt_cost)
+                C_ge.append(sum(c[i] for i in c_ge))
                 
                 sol_unbias = greedy_optimize(qc, betas, C_cost, beta_unbias, shots=shots)
                 E= expectation_value_cost_shifted(qc, betas, C_cost, sol_unbias, shots=shots)
-                E_unbias.append(E/ opt_cost)
+                E_unbias.append(E)
 
                 sol_bias = greedy_optimize(qc, betas, C_cost, beta_bias, shots=shots)
                 E= expectation_value_cost_shifted(qc, betas, C_cost, sol_bias, shots=shots)
-                E_bias.append(E/ opt_cost)
+                E_bias.append(E)
                 
                 sol_mean = greedy_optimize(qc, betas, C_cost, beta_mean, shots=shots)
                 E= expectation_value_cost_shifted(qc, betas, C_cost, sol_mean, shots=shots)
-                E_mean.append(E/ opt_cost)
+                E_mean.append(E)
 
-            results[n]["Greedy random edge"].append(np.mean(np.array(C_ge)) / opt_cost)
+            results[n]["Greedy random edge"].append(np.mean(np.array(C_ge))/opt_cost)
             results[n]["Quantum greedy bias"].append(np.mean(np.array(E_bias))/ opt_cost)
             results[n]["Quantum greedy unbias"].append(np.mean(np.array(E_unbias))/ opt_cost)
             results[n]["Quantum greedy mean field"].append(np.mean(np.array(E_mean))/ opt_cost)
@@ -228,15 +228,25 @@ from datetime import datetime
 
 def plot_with_error_bars(n_values, means, stds, prefix="vertex_cover_performance"):
     plt.figure(figsize=(9, 6))
-    for method in means:
+
+    # Filter methods (exclude optimal)
+    methods = [m for m in means if m.lower() != "optimal"]
+
+    # Choose a colormap with enough distinct colors
+    cmap = plt.get_cmap("tab20")
+    colors = cmap.colors
+
+    for i, method in enumerate(methods):
         plt.errorbar(
             n_values,
             means[method],
             yerr=stds[method],
             marker="o",
             capsize=4,
+            color=colors[i % len(colors)],
             label=method
         )
+
     plt.xlabel("Graph size (n)")
     plt.ylabel(r"Performance $|C| / |C^*|$")
     plt.title("Vertex Cover Performance vs Graph Size")
@@ -244,7 +254,6 @@ def plot_with_error_bars(n_values, means, stds, prefix="vertex_cover_performance
     plt.grid(True)
     plt.tight_layout()
 
-    # Generate unique filename with timestamp
     timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
     filename = f"{prefix}_{timestamp}.png"
     plt.savefig(filename)

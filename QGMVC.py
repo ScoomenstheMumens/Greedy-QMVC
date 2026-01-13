@@ -120,7 +120,7 @@ def run_experiment_stats_weighted(
                 E= expectation_value_cost_shifted(qc, betas, C_cost, sol_mean, shots=shots)
                 E_mean.append(E/ opt_cost)
 
-            results[n]["Greedy random edge"].append(np.mean(np.array(C_ge)))
+            results[n]["Greedy random edge"].append(np.mean(np.array(C_ge)) / opt_cost)
             results[n]["Quantum greedy bias"].append(np.mean(np.array(E_bias))/ opt_cost)
             results[n]["Quantum greedy unbias"].append(np.mean(np.array(E_unbias))/ opt_cost)
             results[n]["Quantum greedy mean field"].append(np.mean(np.array(E_mean))/ opt_cost)

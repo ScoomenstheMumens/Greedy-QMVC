@@ -21,86 +21,7 @@ from qiskit_aer import Aer
 from qiskit import transpile
 
 from collections import defaultdict
-'''
-def greedy_distance1_coloring(G):
-    """
-    Standard greedy vertex coloring (distance-1).
-    Returns:
-        c : dict {node: color}
-    """
-    c = {}
-    nodes = list(G.nodes())
 
-    for v in nodes:
-        forbidden = set()
-
-        # distance 1 only
-        for u in G.neighbors(v):
-            if u in c:
-                forbidden.add(c[u])
-
-        # choose smallest available color
-        color = 0
-        while color in forbidden:
-            color += 1
-
-        c[v] = color
-
-    return c
-
-def greedy_distance2_coloring(G):
-    """
-    Greedy distance-2 coloring.
-    Returns:
-        c : dict {node: color}
-    """
-    c = {}
-    nodes = list(G.nodes())
-
-    for v in nodes:
-        forbidden = set()
-
-        # distance 1
-        for u in G.neighbors(v):
-            if u in c:
-                forbidden.add(c[u])
-
-        # distance 2
-        for u in G.neighbors(v):
-            for w in G.neighbors(u):
-                if w in c:
-                    forbidden.add(c[w])
-
-        # assign smallest available color
-        color = 0
-        while color in forbidden:
-            color += 1
-
-        c[v] = color
-
-    return c
-def order_nodes_by_color_size(G, c):
-    """
-    Orders nodes so that vertices belonging to the
-    largest color class come first.
-    """
-    color_classes = defaultdict(list)
-    for v, col in c.items():
-        color_classes[col].append(v)
-
-    # sort colors by size (descending)
-    sorted_colors = sorted(
-        color_classes.keys(),
-        key=lambda col: len(color_classes[col]),
-        reverse=True
-    )
-
-    ordered_nodes = []
-    for col in sorted_colors:
-        ordered_nodes.extend(color_classes[col])
-
-    return ordered_nodes
-'''
 
 def node_order_by_cost_degree(G, C):
     """
@@ -110,7 +31,8 @@ def node_order_by_cost_degree(G, C):
     """
     return sorted(
         G.nodes(),
-        key=lambda i: (G.degree(i),-C[i])
+        key=lambda i: (G.degree(i),C[i])
+        #key=lambda i: (G.degree(i),-C[i])
         #key=lambda i: (G.degree(i)/C[i])
     )
 
@@ -139,61 +61,6 @@ def mixer_from_graph(G,c):
 
     return qc, betas, G
 
-'''
-def mixer_from_graph(G,c):
-    G = nx.convert_node_labels_to_integers(G)
-    n = G.number_of_nodes()
-
-    qc = QuantumCircuit(n)
-    betas = {i: Parameter(f"β_{i}") for i in G.nodes()}
-
-    for i in range(n):
-        qc.x(i)
-
-    for tgt in G.nodes():
-        angle = 2 * betas[tgt]
-        ctrls = list(G.neighbors(tgt))
-        if ctrls:
-            qc.append(RXGate(angle).control(len(ctrls)), ctrls + [tgt])
-        else:
-            qc.rx(angle, tgt)
-
-    return qc, betas, G
-'''
-
-'''
-def mixer_from_graph(G,c):
-    G = nx.convert_node_labels_to_integers(G)
-    n = G.number_of_nodes()
-
-    # 1️⃣ distance-2 coloring
-    color = greedy_distance1_coloring(G)
-
-    qc = QuantumCircuit(n)
-    betas = {i: Parameter(f"β_{i}") for i in G.nodes()}
-
-    # initialize |+>
-    for i in range(n):
-        qc.x(i)
-
-    # 2️⃣ order nodes by largest color class first
-    ordered_nodes = order_nodes_by_color_size(G, color)
-
-    # 3️⃣ build mixer
-    for tgt in ordered_nodes:
-        angle = 2 * betas[tgt]
-        ctrls = list(G.neighbors(tgt))
-
-        if ctrls:
-            qc.append(
-                RXGate(angle).control(len(ctrls)),
-                ctrls + [tgt]
-            )
-        else:
-            qc.rx(angle, tgt)
-
-    return qc, betas, G
-'''
 def expectation_value_cost_shifted(qc, betas, C, beta_values, shots=None):
     bind_dict = {betas[i]: beta_values[i] for i in betas}
     qc_bound = qc.assign_parameters(bind_dict)
@@ -315,6 +182,7 @@ def greedy_optimize(qc, betas, C, beta_values,shots=None):
             if E < best_E:
                 best_E = E
                 best_val = candidate
+                
 
         values[i] = best_val
         free.remove(i)
@@ -413,15 +281,142 @@ def mean_field_cost_degree_order_init(G, C_cost, order, alpha=1, beta=1, gamma=1
         p = p_new
 
     return {j: np.arcsin(np.sqrt(p[j])) for j in p}
-def node_order_by_cost_degree(G, C):
+
+
+
+'''
+def greedy_distance1_coloring(G):
     """
-    Order nodes by:
-      1) descending cost
-      2) descending degree
+    Standard greedy vertex coloring (distance-1).
+    Returns:
+        c : dict {node: color}
     """
-    return sorted(
-        G.nodes(),
-        #key=lambda i: (i)
-        key=lambda i: (G.degree(i), -C[i]),
-        #key=lambda i: (-G.degree(i)/C[i])
+    c = {}
+    nodes = list(G.nodes())
+
+    for v in nodes:
+        forbidden = set()
+
+        # distance 1 only
+        for u in G.neighbors(v):
+            if u in c:
+                forbidden.add(c[u])
+
+        # choose smallest available color
+        color = 0
+        while color in forbidden:
+            color += 1
+
+        c[v] = color
+
+    return c
+
+def greedy_distance2_coloring(G):
+    """
+    Greedy distance-2 coloring.
+    Returns:
+        c : dict {node: color}
+    """
+    c = {}
+    nodes = list(G.nodes())
+
+    for v in nodes:
+        forbidden = set()
+
+        # distance 1
+        for u in G.neighbors(v):
+            if u in c:
+                forbidden.add(c[u])
+
+        # distance 2
+        for u in G.neighbors(v):
+            for w in G.neighbors(u):
+                if w in c:
+                    forbidden.add(c[w])
+
+        # assign smallest available color
+        color = 0
+        while color in forbidden:
+            color += 1
+
+        c[v] = color
+
+    return c
+def order_nodes_by_color_size(G, c):
+    """
+    Orders nodes so that vertices belonging to the
+    largest color class come first.
+    """
+    color_classes = defaultdict(list)
+    for v, col in c.items():
+        color_classes[col].append(v)
+
+    # sort colors by size (descending)
+    sorted_colors = sorted(
+        color_classes.keys(),
+        key=lambda col: len(color_classes[col]),
+        reverse=True
     )
+
+    ordered_nodes = []
+    for col in sorted_colors:
+        ordered_nodes.extend(color_classes[col])
+
+    return ordered_nodes
+'''
+
+'''
+def mixer_from_graph(G,c):
+    G = nx.convert_node_labels_to_integers(G)
+    n = G.number_of_nodes()
+
+    qc = QuantumCircuit(n)
+    betas = {i: Parameter(f"β_{i}") for i in G.nodes()}
+
+    for i in range(n):
+        qc.x(i)
+
+    for tgt in G.nodes():
+        angle = 2 * betas[tgt]
+        ctrls = list(G.neighbors(tgt))
+        if ctrls:
+            qc.append(RXGate(angle).control(len(ctrls)), ctrls + [tgt])
+        else:
+            qc.rx(angle, tgt)
+
+    return qc, betas, G
+'''
+
+'''
+def mixer_from_graph(G,c):
+    G = nx.convert_node_labels_to_integers(G)
+    n = G.number_of_nodes()
+
+    # 1️⃣ distance-2 coloring
+    color = greedy_distance1_coloring(G)
+
+    qc = QuantumCircuit(n)
+    betas = {i: Parameter(f"β_{i}") for i in G.nodes()}
+
+    # initialize |+>
+    for i in range(n):
+        qc.x(i)
+
+    # 2️⃣ order nodes by largest color class first
+    ordered_nodes = order_nodes_by_color_size(G, color)
+
+    # 3️⃣ build mixer
+    for tgt in ordered_nodes:
+        angle = 2 * betas[tgt]
+        ctrls = list(G.neighbors(tgt))
+
+        if ctrls:
+            qc.append(
+                RXGate(angle).control(len(ctrls)),
+                ctrls + [tgt]
+            )
+        else:
+            qc.rx(angle, tgt)
+
+    return qc, betas, G
+'''

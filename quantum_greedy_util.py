@@ -31,7 +31,7 @@ def node_order_by_cost_degree(G, C):
     """
     return sorted(
         G.nodes(),
-        key=lambda i: (G.degree(i),C[i])
+        key=lambda i: (G.degree(i),-C[i])
         #key=lambda i: (G.degree(i),-C[i])
         #key=lambda i: (G.degree(i)/C[i])
     )
@@ -40,7 +40,7 @@ def node_order_by_cost_degree(G, C):
 
 # ---------------- Graph & mixer ----------------
 
-def mixer_from_graph(G,c):
+def mixer_from_graph(G, c, node_order=None):
     G = nx.convert_node_labels_to_integers(G)
     n = G.number_of_nodes()
 
@@ -49,9 +49,11 @@ def mixer_from_graph(G,c):
 
     for i in range(n):
         qc.x(i)
-    # 🔥 ORDER NODES HERE
-    ordered_nodes = node_order_by_cost_degree(G,c)
-    for tgt in ordered_nodes:
+
+    if node_order is None:
+        node_order = node_order_by_cost_degree(G, c)
+
+    for tgt in node_order:
         angle = 2 * betas[tgt]
         ctrls = list(G.neighbors(tgt))
         if ctrls:
@@ -60,6 +62,8 @@ def mixer_from_graph(G,c):
             qc.rx(angle, tgt)
 
     return qc, betas, G
+
+# ---------------- Expectation value ----------------
 
 def expectation_value_cost_shifted(qc, betas, C, beta_values, shots=None):
     bind_dict = {betas[i]: beta_values[i] for i in betas}
@@ -102,67 +106,59 @@ def expectation_value_cost_shifted(qc, betas, C, beta_values, shots=None):
         exp_val += prob * hz_value
 
     return shift + exp_val
-
-def expectation_and_variance(qc, betas, C, beta_values, shots: int | None = None):
-    """
-    Compute the mean and variance of the cost H = sum_i c_i (1-Z_i)/2
-    Supports both ideal (shots=None) and shot-based estimation.
-
-    Args:
-        qc: QuantumCircuit with parameterized mixer
-        betas: dict of Qiskit Parameters
-        C: dict mapping qubit -> cost coefficient
-        beta_values: dict mapping qubit -> float
-        shots: number of shots for measurement (None = ideal)
-
-    Returns:
-        (mean, variance)
-    """
+def expectation_value_cost_shifted_with_bitstring(
+    qc, betas, C, beta_values, shots=None
+):
     bind_dict = {betas[i]: beta_values[i] for i in betas}
     qc_bound = qc.assign_parameters(bind_dict)
 
     n = qc.num_qubits
+    paulis = []
+    coeffs = []
 
+    for i, c_i in C.items():
+        p = ["I"] * n
+        p[n-i-1] = "Z"
+        paulis.append("".join(p))
+        coeffs.append(-0.5 * c_i)
+
+    HZ = SparsePauliOp(paulis, coeffs)
+    shift = 0.5 * sum(C.values())
+
+    # ----- statevector -----
     if shots is None:
-        # Ideal case using statevector
         psi = Statevector.from_instruction(qc_bound)
-        mean = 0.0
-        var = 0.0
+        exp_val = shift + psi.expectation_value(HZ).real
+
+        probs = psi.probabilities_dict()
+        most_probable_bitstring = max(probs, key=probs.get)
+
+        return exp_val, most_probable_bitstring
+
+    # ----- shot-based -----
+    qc_meas = qc_bound.copy()
+    qc_meas.measure_all()
+
+    backend = Aer.get_backend("aer_simulator")
+    qc_meas = transpile(qc_meas, backend)
+    counts = backend.run(qc_meas, shots=shots).result().get_counts()
+
+    exp_val = 0.0
+    for bitstring, count in counts.items():
+        prob = count / shots
+        z_vals = np.array([1 if b == "0" else -1 for b in bitstring[::-1]])
+
+        hz_value = 0.0
         for i, c_i in C.items():
-            # expectation <Z_i>
-            p_str = ["I"] * n
-            p_str[i] = "Z"
-            Zi = SparsePauliOp("".join(p_str))
-            exp_Z = psi.expectation_value(Zi).real
+            hz_value += -0.5 * c_i * z_vals[i]
 
-            # probability qubit i = 1
-            p1 = (1 - exp_Z) / 2
-            mean += c_i * p1
-            var += c_i**2 * p1 * (1 - p1)
+        exp_val += prob * hz_value
 
-        return mean, var
+    most_probable_bitstring = max(counts, key=counts.get)
 
-    else:
-        # Shot-based case
-        qc_meas = qc_bound.copy()
-        qc_meas.measure_all()
+    return shift + exp_val, most_probable_bitstring
 
-        backend = Aer.get_backend("aer_simulator")
-        qc_meas = transpile(qc_meas, backend)
-        counts = backend.run(qc_meas, shots=shots).result().get_counts()
 
-        costs = []
-        for bitstring, count in counts.items():
-            z_vals = np.array([1 if b == "0" else -1 for b in bitstring[::-1]])
-            cost = sum(c_i * (1 - z_vals[i]) / 2 for i, c_i in C.items())
-            costs += [cost] * count
-
-        costs = np.array(costs)
-        mean = costs.mean()
-        var = costs.var(ddof=0)  # population variance
-        return mean, var
-
-    return best
 
 # ---------------- Greedy optimizers ----------------
 
@@ -188,6 +184,9 @@ def greedy_optimize(qc, betas, C, beta_values,shots=None):
         free.remove(i)
 
     return values
+
+
+
 
 def greedy_optimize_seq(qc, betas, C, beta_values,shots= None):
     values = beta_values.copy()
@@ -239,29 +238,8 @@ def greedy_optimize_seq_rev(qc, betas, C, beta_values,shots= None):
 
     return values
 
-def greedy_optimize_risk_aware(qc, betas, C, beta_values, shots=None, lam=0.5):
-    values = beta_values.copy()
-    free = list(betas.keys())
-    #while free:
-        #i = random.choice(free)
-    for i in range(len(free)):
-        mu, var = expectation_and_variance(qc, betas, C, values, shots)
-        best_score = mu + lam * math.sqrt(var)
-        best_val = values[i]
+# ---------------- Mean field initialization ----------------
 
-        for candidate in (0.0, math.pi/2):
-            trial = values.copy()
-            trial[i] = candidate
-            mu_t, var_t = expectation_and_variance(qc, betas, C, trial, shots)
-            score = mu_t + lam * math.sqrt(var_t)
-            if score < best_score:
-                best_score = score
-                best_val = candidate
-
-        values[i] = best_val
-        free.remove(i)
-
-    return values
 def mean_field_cost_degree_order_init(G, C_cost, order, alpha=1, beta=1, gamma=1,delta=0.2, n_iter=30):
     n = len(G)
     rank = {j: k / n for k, j in enumerate(order)}
@@ -419,4 +397,89 @@ def mixer_from_graph(G,c):
             qc.rx(angle, tgt)
 
     return qc, betas, G
+
+
+def expectation_and_variance(qc, betas, C, beta_values, shots: int | None = None):
+    """
+    Compute the mean and variance of the cost H = sum_i c_i (1-Z_i)/2
+    Supports both ideal (shots=None) and shot-based estimation.
+
+    Args:
+        qc: QuantumCircuit with parameterized mixer
+        betas: dict of Qiskit Parameters
+        C: dict mapping qubit -> cost coefficient
+        beta_values: dict mapping qubit -> float
+        shots: number of shots for measurement (None = ideal)
+
+    Returns:
+        (mean, variance)
+    """
+    bind_dict = {betas[i]: beta_values[i] for i in betas}
+    qc_bound = qc.assign_parameters(bind_dict)
+
+    n = qc.num_qubits
+
+    if shots is None:
+        # Ideal case using statevector
+        psi = Statevector.from_instruction(qc_bound)
+        mean = 0.0
+        var = 0.0
+        for i, c_i in C.items():
+            # expectation <Z_i>
+            p_str = ["I"] * n
+            p_str[i] = "Z"
+            Zi = SparsePauliOp("".join(p_str))
+            exp_Z = psi.expectation_value(Zi).real
+
+            # probability qubit i = 1
+            p1 = (1 - exp_Z) / 2
+            mean += c_i * p1
+            var += c_i**2 * p1 * (1 - p1)
+
+        return mean, var
+
+    else:
+        # Shot-based case
+        qc_meas = qc_bound.copy()
+        qc_meas.measure_all()
+
+        backend = Aer.get_backend("aer_simulator")
+        qc_meas = transpile(qc_meas, backend)
+        counts = backend.run(qc_meas, shots=shots).result().get_counts()
+
+        costs = []
+        for bitstring, count in counts.items():
+            z_vals = np.array([1 if b == "0" else -1 for b in bitstring[::-1]])
+            cost = sum(c_i * (1 - z_vals[i]) / 2 for i, c_i in C.items())
+            costs += [cost] * count
+
+        costs = np.array(costs)
+        mean = costs.mean()
+        var = costs.var(ddof=0)  # population variance
+        return mean, var
+
+    return best
+
+def greedy_optimize_risk_aware(qc, betas, C, beta_values, shots=None, lam=0.5):
+    values = beta_values.copy()
+    free = list(betas.keys())
+    #while free:
+        #i = random.choice(free)
+    for i in range(len(free)):
+        mu, var = expectation_and_variance(qc, betas, C, values, shots)
+        best_score = mu + lam * math.sqrt(var)
+        best_val = values[i]
+
+        for candidate in (0.0, math.pi/2):
+            trial = values.copy()
+            trial[i] = candidate
+            mu_t, var_t = expectation_and_variance(qc, betas, C, trial, shots)
+            score = mu_t + lam * math.sqrt(var_t)
+            if score < best_score:
+                best_score = score
+                best_val = candidate
+
+        values[i] = best_val
+        free.remove(i)
+    return values
 '''

@@ -93,7 +93,7 @@ def run_single_graph(args):
     qc, betas, Gn = mixer_from_graph(G, c)
     C_cost = {i: c[i] for i in Gn.nodes()}
 
-    beta_bias = {i: 0.8 * np.pi / 2 for i in C_cost}
+    beta_bias={i: np.pi/4+(i/len(C_cost))*0.1 for i in C_cost} #depth dependent 
     beta_unbias = {i: 0.5 * np.pi / 2 for i in C_cost}
 
     E_bias, E_unbias = [], []
@@ -114,11 +114,11 @@ def run_single_graph(args):
 
     sol_bias = greedy_optimize_seq(qc, betas, C_cost, beta_bias, shots=shots)
     E = expectation_value_cost_shifted(qc, betas, C_cost, sol_bias, shots=shots)
-    out["Quantum greedy seq bias"].append(E / opt_cost)
+    out["Quantum greedy seq bias"] = E / opt_cost
 
     sol_unbias = greedy_optimize_seq(qc, betas, C_cost, beta_unbias, shots=shots)
     E = expectation_value_cost_shifted(qc, betas, C_cost, sol_unbias, shots=shots)
-    out["Quantum greedy seq unbias"].append(E / opt_cost)
+    out["Quantum greedy seq unbias"] = E / opt_cost
 
     return n, out
 
@@ -134,7 +134,7 @@ def run_experiment_stats_weighted(
     case="weighted",
     graph_type="regular",
     degree=3,
-    seed=0,
+    seed=None,
 ):
     methods = [
         "optimal",

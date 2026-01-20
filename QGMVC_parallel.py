@@ -36,6 +36,7 @@ from quantum_greedy_util import (
     mixer_from_graph,
     expectation_value_cost_shifted,
     greedy_optimize,
+    greedy_optimize_seq
 )
 
 from classical_runtime_guarantee_util import (
@@ -111,6 +112,14 @@ def run_single_graph(args):
     out["Quantum greedy bias"] = np.mean(E_bias) / opt_cost
     out["Quantum greedy unbias"] = np.mean(E_unbias) / opt_cost
 
+    sol_bias = greedy_optimize_seq(qc, betas, C_cost, beta_bias, shots=shots)
+    E = expectation_value_cost_shifted(qc, betas, C_cost, sol_bias, shots=shots)
+    out["Quantum greedy seq bias"].append(E / opt_cost)
+
+    sol_unbias = greedy_optimize_seq(qc, betas, C_cost, beta_unbias, shots=shots)
+    E = expectation_value_cost_shifted(qc, betas, C_cost, sol_unbias, shots=shots)
+    out["Quantum greedy seq unbias"].append(E / opt_cost)
+
     return n, out
 
 
@@ -135,6 +144,8 @@ def run_experiment_stats_weighted(
         "Greedy vertex degree",
         "Quantum greedy bias",
         "Quantum greedy unbias",
+        "Quantum greedy seq bias",
+        "Quantum greedy seq unbias",
     ]
 
     results = {n: {m: [] for m in methods} for n in n_values}

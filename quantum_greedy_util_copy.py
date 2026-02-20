@@ -85,6 +85,47 @@ def expectation_value_cost_shifted(qc, betas, C, beta_values, shots=None):
     return shift + exp_val
 
 
+def mixer_from_graph(
+    G,
+    c,
+    betas,
+    p=1,
+    node_order=None
+):
+    """
+    Gate order is EXACTLY:
+      1) all active nodes (p layers)
+      2) trial_node (once)
+      3) previously fixed nodes (once)
+    """
+
+    G = nx.convert_node_labels_to_integers(G)
+    n = G.number_of_nodes()
+    qc = QuantumCircuit(n)
+
+    # Initial X layer
+    for i in range(n):
+        qc.x(i)
+
+    if node_order is None:
+        node_order = node_order_by_cost_degree(G, c)
+
+    
+    # ---- ACTIVE (p layers)
+    for _ in range(p):
+        for tgt in node_order:
+            angle = 2 * betas[tgt] / p
+            ctrls = [u for u in G.neighbors(tgt)]
+            if ctrls:
+                qc.append(RXGate(angle).control(len(ctrls)), ctrls + [tgt])
+            else:
+                qc.rx(angle, tgt)
+
+    
+    
+
+    return qc
+
 
 
 def mixer_from_graph_subset(
@@ -208,20 +249,15 @@ def mixer_from_graph_subset_rev(
                 qc.append(RXGate(angle).control(len(ctrls)), ctrls + [tgt])
             else:
                 qc.rx(angle, tgt)
-
-    
-    
-
     return qc
 
-def mixer_from_graph_subset_notrial(
+def circuit_from_graph_commutator(
     G,
     c,
     active_nodes,
-    fixed_nodes,
+    trial_node,
     betas,
     p=1,
-    node_order=None
 ):
     """
     Gate order is EXACTLY:
@@ -241,88 +277,49 @@ def mixer_from_graph_subset_notrial(
     if node_order is None:
         node_order = node_order_by_cost_degree(G, c)
 
-    present = set(active_nodes) | set(fixed_nodes)
-
-    active_order = [v for v in node_order if v in active_nodes]
-    fixed_order  = [v for v in node_order if v in fixed_nodes]
-
     # ---- ACTIVE (p layers)
     for _ in range(p):
-        for tgt in active_order:
+        for tgt in active_nodes:
             angle = 2 * betas[tgt] / p
-            ctrls = [u for u in G.neighbors(tgt) if u in present]
+            ctrls = [u for u in G.neighbors(tgt)]
             if ctrls:
                 qc.append(RXGate(angle).control(len(ctrls)), ctrls + [tgt])
             else:
                 qc.rx(angle, tgt)
 
-
-    # ---- PREVIOUSLY FIXED
-    for tgt in fixed_order:
-        angle = 2 * betas[tgt]
-        ctrls = [u for u in G.neighbors(tgt) if u in present]
-        if ctrls:
-            qc.append(RXGate(angle).control(len(ctrls)), ctrls + [tgt])
-        else:
-            qc.rx(angle, tgt)
-
-    return qc
-
-def mixer_from_graph_subset_notrial_rev(
-    G,
-    c,
-    active_nodes,
-    fixed_nodes,
-    betas,
-    p=1,
-    node_order=None
-):
-    """
-    Gate order is EXACTLY:
-      1) all active nodes (p layers)
-      2) trial_node (once)
-      3) previously fixed nodes (once)
-    """
-
-    G = nx.convert_node_labels_to_integers(G)
-    n = G.number_of_nodes()
-    qc = QuantumCircuit(n)
-
-    # Initial X layer
-    for i in range(n):
-        qc.x(i)
-
-    if node_order is None:
-        node_order = node_order_by_cost_degree(G, c)
-
-    present = set(active_nodes) |  set(fixed_nodes)
-
-    active_order = [v for v in node_order if v in active_nodes]
-    fixed_order  = [v for v in node_order if v in fixed_nodes]
-    # ---- PREVIOUSLY FIXED
-    for tgt in fixed_order:
-        angle = 2 * betas[tgt]
-        ctrls = [u for u in G.neighbors(tgt) if u in present]
-        if ctrls:
-            qc.append(RXGate(angle).control(len(ctrls)), ctrls + [tgt])
-        else:
-            qc.rx(angle, tgt)
-    
+    # ---- TRIAL (first fixed)
+    tgt = trial_node
+    angle = 2 * betas[tgt]
+    ctrls = [u for u in G.neighbors(tgt)]
+    if ctrls:
+        qc.append(RXGate(angle).control(len(ctrls)), ctrls + [tgt])
+    else:
+        qc.rx(angle, tgt)
 
     # ---- ACTIVE (p layers)
     for _ in range(p):
-        for tgt in active_order:
-            angle = 2 * betas[tgt] / p
-            ctrls = [u for u in G.neighbors(tgt) if u in present]
+        for tgt in active_nodes:
+            angle = -2 * betas[tgt] / p
+            ctrls = [u for u in G.neighbors(tgt)]
             if ctrls:
                 qc.append(RXGate(angle).control(len(ctrls)), ctrls + [tgt])
             else:
                 qc.rx(angle, tgt)
 
-    
+    # ---- TRIAL (first fixed)
+    tgt = trial_node
+    angle = -2 * betas[tgt]
+    ctrls = [u for u in G.neighbors(tgt)]
+    if ctrls:
+        qc.append(RXGate(angle).control(len(ctrls)), ctrls + [tgt])
+    else:
+        qc.rx(angle, tgt)
     
 
     return qc
+
+
+
 # ---------------------------------------------------------
 # Greedy vertex elimination
 # ---------------------------------------------------------
@@ -397,47 +394,6 @@ def greedy_optimize_vertex_elimination(
 
 
 
-def mixer_from_graph(
-    G,
-    c,
-    betas,
-    p=1,
-    node_order=None
-):
-    """
-    Gate order is EXACTLY:
-      1) all active nodes (p layers)
-      2) trial_node (once)
-      3) previously fixed nodes (once)
-    """
-
-    G = nx.convert_node_labels_to_integers(G)
-    n = G.number_of_nodes()
-    qc = QuantumCircuit(n)
-
-    # Initial X layer
-    for i in range(n):
-        qc.x(i)
-
-    if node_order is None:
-        node_order = node_order_by_cost_degree(G, c)
-
-    
-    # ---- ACTIVE (p layers)
-    for _ in range(p):
-        for tgt in node_order:
-            angle = 2 * betas[tgt] / p
-            ctrls = [u for u in G.neighbors(tgt)]
-            if ctrls:
-                qc.append(RXGate(angle).control(len(ctrls)), ctrls + [tgt])
-            else:
-                qc.rx(angle, tgt)
-
-    
-    
-
-    return qc
-
 
 def greedy_optimize_vertex_elimination_n2(
     G,
@@ -453,7 +409,8 @@ def greedy_optimize_vertex_elimination_n2(
     values = beta_values_init.copy()
     unfixed = list(range(n))
     fixed = []
-
+    global_energy=np.inf
+    global_vertices=None
     while unfixed:
 
         qc = mixer_from_graph(G, c, betas=betas, p=p)
@@ -468,7 +425,7 @@ def greedy_optimize_vertex_elimination_n2(
         if len(unfixed)==n:
             best_energy=np.inf
         else:
-            best_energy = current_energy
+            best_energy = np.inf
 
         improvement_found = False
 
@@ -489,13 +446,19 @@ def greedy_optimize_vertex_elimination_n2(
                 improvement_found = True
         #print(best_vertex)
         # STOP CONDITION
+        '''
         if not improvement_found:
             print("No further improvement possible. Stopping.")
             break
+        '''
+        if best_energy<global_energy:
+            global_energy=best_energy
+            global_vertices=values
 
         # Apply best move
         values[best_vertex] = best_value
         fixed.append(best_vertex)
         unfixed.remove(best_vertex)
 
-    return values, best_energy
+    return global_vertices,global_energy
+

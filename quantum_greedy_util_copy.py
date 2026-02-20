@@ -462,3 +462,153 @@ def greedy_optimize_vertex_elimination_n2(
 
     return global_vertices,global_energy
 
+
+def echo_commutator_circuit(
+    G,
+    c,
+    active_nodes,
+    trial_node,
+    betas,
+    p=1,
+):
+    """
+    Parameterized echo circuit:
+        U = A B A† B†
+    """
+
+    G = nx.convert_node_labels_to_integers(G)
+    n = G.number_of_nodes()
+    qc = QuantumCircuit(n)
+
+    # |psi> = |111...1>
+    for i in range(n):
+        qc.x(i)
+
+    # ---- A (active p layers)
+    for _ in range(p):
+        for tgt in active_nodes:
+            angle = 2 * betas[tgt] / p
+            ctrls = list(G.neighbors(tgt))
+            if ctrls:
+                qc.append(RXGate(angle).control(len(ctrls)), ctrls + [tgt])
+            else:
+                qc.rx(angle, tgt)
+
+    # ---- B (trial)
+    tgt = trial_node
+    angle = 2 * betas[tgt]
+    ctrls = list(G.neighbors(tgt))
+    if ctrls:
+        qc.append(RXGate(angle).control(len(ctrls)), ctrls + [tgt])
+    else:
+        qc.rx(angle, tgt)
+
+    # ---- A†
+    for _ in range(p):
+        for tgt in active_nodes:
+            angle = -2 * betas[tgt] / p
+            ctrls = list(G.neighbors(tgt))
+            if ctrls:
+                qc.append(RXGate(angle).control(len(ctrls)), ctrls + [tgt])
+            else:
+                qc.rx(angle, tgt)
+
+    # ---- B†
+    tgt = trial_node
+    angle = -2 * betas[tgt]
+    ctrls = list(G.neighbors(tgt))
+    if ctrls:
+        qc.append(RXGate(angle).control(len(ctrls)), ctrls + [tgt])
+    else:
+        qc.rx(angle, tgt)
+
+    return qc
+
+def echo_fidelity(qc, betas, beta_values, shots=None):
+
+    # Bind ONLY parameters present in the circuit
+    present_params = qc.parameters
+    bind_dict = {
+        betas[i]: beta_values[i]
+        for i in betas
+        if betas[i] in present_params
+    }
+
+    qc_bound = qc.assign_parameters(bind_dict)
+
+    n = qc.num_qubits
+    target = "1" * n
+
+    # ----- statevector -----
+    if shots is None:
+        psi = Statevector.from_instruction(qc_bound)
+        return psi.probabilities_dict().get(target, 0.0)
+
+    # ----- shot-based -----
+    qc_meas = qc_bound.copy()
+    qc_meas.measure_all()
+
+    backend = Aer.get_backend("aer_simulator")
+    qc_meas = transpile(qc_meas, backend)
+    result = backend.run(qc_meas, shots=shots).result()
+    counts = result.get_counts()
+
+    return counts.get(target, 0) / shots
+
+def greedy_remove_most_noncommuting(
+    G,
+    c,
+    betas,
+    beta_values,
+    p=1,
+    shots=None,
+):
+    """
+    Removes vertex whose mixer least commutes with active block,
+    measured via echo fidelity.
+    """
+
+    n = G.number_of_nodes()
+    values = beta_values.copy()
+
+    unfixed = list(range(n))
+    fixed = []
+
+    while unfixed:
+
+        best_vertex = None
+        worst_fidelity = 1.0
+
+        active_nodes = unfixed.copy()
+        #print(active_nodes)
+        for v in unfixed:
+
+            trial_active = [u for u in active_nodes if u != v]
+
+            qc = echo_commutator_circuit(
+                G,
+                c,
+                active_nodes=trial_active,
+                trial_node=v,
+                betas=betas,
+                p=p,
+            )
+
+            F = echo_fidelity(qc, betas, values, shots)
+            #print(F, v)
+
+            if F < worst_fidelity:
+                worst_fidelity = F
+                best_vertex = v
+
+        if best_vertex is None:
+            print("No further non-commuting structure detected.")
+            break
+
+        #print(f"Removing vertex {best_vertex}, fidelity={worst_fidelity}")
+    
+        fixed.append(best_vertex)
+        unfixed.remove(best_vertex)
+        #print("energy",n-len(unfixed))
+    energy=n-len(unfixed)
+    return fixed, energy

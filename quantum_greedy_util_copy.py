@@ -397,15 +397,55 @@ def greedy_optimize_vertex_elimination(
 
 
 
-def greedy_optimize_vertex_elimination_trialinthemid(
+def mixer_from_graph(
+    G,
+    c,
+    betas,
+    p=1,
+    node_order=None
+):
+    """
+    Gate order is EXACTLY:
+      1) all active nodes (p layers)
+      2) trial_node (once)
+      3) previously fixed nodes (once)
+    """
+
+    G = nx.convert_node_labels_to_integers(G)
+    n = G.number_of_nodes()
+    qc = QuantumCircuit(n)
+
+    # Initial X layer
+    for i in range(n):
+        qc.x(i)
+
+    if node_order is None:
+        node_order = node_order_by_cost_degree(G, c)
+
+    
+    # ---- ACTIVE (p layers)
+    for _ in range(p):
+        for tgt in node_order:
+            angle = 2 * betas[tgt] / p
+            ctrls = [u for u in G.neighbors(tgt)]
+            if ctrls:
+                qc.append(RXGate(angle).control(len(ctrls)), ctrls + [tgt])
+            else:
+                qc.rx(angle, tgt)
+
+    
+    
+
+    return qc
+
+
+def greedy_optimize_vertex_elimination_n2(
     G,
     c,
     C,
     beta_values_init,
     p=1,
     shots=None,
-    pick_strategy="random",
-    strategy="forward "
 ):
     n = G.number_of_nodes()
     betas = {i: Parameter(f"β_{i}") for i in range(n)}
@@ -416,215 +456,46 @@ def greedy_optimize_vertex_elimination_trialinthemid(
 
     while unfixed:
 
-        v = random.choice(unfixed) if pick_strategy == "random" else unfixed[-1]
+        qc = mixer_from_graph(G, c, betas=betas, p=p)
 
-        best_E = np.inf
-        best_val = None
+        # Current baseline energy
+        current_energy = expectation_value_cost_shifted(
+            qc, betas, C, values, shots
+        )
 
-        for candidate in (0.0, math.pi / 2):
+        best_vertex = None
+        best_value = None
+        if len(unfixed)==n:
+            best_energy=np.inf
+        else:
+            best_energy = current_energy
+
+        improvement_found = False
+
+        for v in unfixed:
+
             trial_vals = values.copy()
-            trial_vals[v] = candidate
+            trial_vals[v] = 0   # or try both 0 and 1 if needed
 
-            active = [u for u in unfixed]
-            if strategy == "forward":
-                qc = mixer_from_graph_subset_notrial(
-                    G,
-                    c,
-                    active_nodes=active,
-                    fixed_nodes=fixed,
-                    betas=betas,
-                    p=p
-                )
-            else:
-                qc = mixer_from_graph_subset_notrial_rev(
-                    G,
-                    c,
-                    active_nodes=active,
-                    fixed_nodes=fixed,
-                    betas=betas,
-                    p=p
-                )
-            
             E = expectation_value_cost_shifted(
                 qc, betas, C, trial_vals, shots
             )
-            #print(E,candidate)
-            if E <= best_E:
-                best_E = E
-                best_val = candidate
+            #print(E,v)
 
-        values[v] = best_val
-        fixed.append(v)
-        unfixed.remove(v)
-
-        #print(f"Fixed vertex {v} -> {best_val}")
-
-    #print("Final values:", values)
-    #print("E",best_E)
-    return values,best_E
-
-
-def greedy_optimize_vertex_elimination_n2(
-    G,
-    c,
-    C,
-    beta_values_init,
-    p=1,
-    shots=None,
-    pick_strategy="best",   # now irrelevant, always best
-    strategy="forward"
-):
-    n = G.number_of_nodes()
-    betas = {i: Parameter(f"β_{i}") for i in range(n)}
-
-    values = beta_values_init.copy()
-    unfixed = list(range(n))
-    fixed = []
-
-    while unfixed:
-
-        global_best_E = np.inf
-        global_best_vertex = None
-        global_best_value = None
-
-        # 🔎 Try ALL unfixed vertices
-        for v in unfixed:
-
-            local_best_E = np.inf
-            local_best_val = None
-
-            # Try both candidates for this vertex
-            for candidate in (0.0, math.pi / 2):
-
-                trial_vals = values.copy()
-                trial_vals[v] = candidate
-
-                active = list(unfixed)
-
-                if strategy == "forward":
-                    qc = mixer_from_graph_subset_notrial(
-                        G,
-                        c,
-                        active_nodes=active,
-                        trial_node=v,
-                        fixed_nodes=fixed,
-                        betas=betas,
-                        p=p
-                    )
-                else:
-                    qc = mixer_from_graph_subset_notrial_rev(
-                        G,
-                        c,
-                        active_nodes=active,
-                        trial_node=v,
-                        fixed_nodes=fixed,
-                        betas=betas,
-                        p=p
-                    )
-
-                E = expectation_value_cost_shifted(
-                    qc, betas, C, trial_vals, shots
-                )
-
-                if E <= local_best_E:
-                    local_best_E = E
-                    local_best_val = candidate
-
-            # After testing both candidates for this vertex,
-            # check if it is globally best
-            if local_best_E <= global_best_E:
-                global_best_E = local_best_E
-                global_best_vertex = v
-                global_best_value = local_best_val
-
-        # ✅ Fix the best vertex found
-        values[global_best_vertex] = global_best_value
-        fixed.append(global_best_vertex)
-        unfixed.remove(global_best_vertex)
-
-    return values, global_best_E
-
-
-def greedy_optimize_vertex_elimination_n2(
-    G,
-    c,
-    C,
-    beta_values_init,
-    p=1,
-    shots=None,
-    strategy="forward"
-):
-    n = G.number_of_nodes()
-    betas = {i: Parameter(f"β_{i}") for i in range(n)}
-
-    values = beta_values_init.copy()
-    unfixed = list(range(n))
-    fixed = []
-
-    while unfixed:
-
-        best_delta = -np.inf
-        best_vertex = None
-        best_value = None
-        best_energy = None
-
-        for v in unfixed:
-
-            trial_vals_0 = values.copy()
-            trial_vals_0[v] = 0.0
-
-            trial_vals_1 = values.copy()
-            trial_vals_1[v] = math.pi / 2
-
-            active = list(unfixed)
-
-            if strategy == "forward":
-                qc = mixer_from_graph_subset_notrial(
-                    G,
-                    c,
-                    active_nodes=active,
-                    #trial_node=v,
-                    fixed_nodes=fixed,
-                    betas=betas,
-                    p=p
-                )
-            else:
-                qc = mixer_from_graph_subset_notrial_rev(
-                    G,
-                    c,
-                    active_nodes=active,
-                    #trial_node=v,
-                    fixed_nodes=fixed,
-                    betas=betas,
-                    p=p
-                )
-
-            E0 = expectation_value_cost_shifted(
-                qc, betas, C, trial_vals_0, shots
-            )
-
-            E1 = expectation_value_cost_shifted(
-                qc, betas, C, trial_vals_1, shots
-            )
-
-            delta = abs(E0 - E1)
-
-            if delta >= best_delta:
-                best_delta = delta
+            if E < best_energy:  # strictly better
+                best_energy = E
+                best_value = 0
                 best_vertex = v
+                improvement_found = True
+        #print(best_vertex)
+        # STOP CONDITION
+        if not improvement_found:
+            print("No further improvement possible. Stopping.")
+            break
 
-                # choose lower energy candidate
-                if E0 <= E1:
-                    best_value = 0.0
-                    best_energy = E0
-                else:
-                    best_value = math.pi / 2
-                    best_energy = E1
-
-        # Fix the most decisive vertex
+        # Apply best move
         values[best_vertex] = best_value
         fixed.append(best_vertex)
         unfixed.remove(best_vertex)
 
     return values, best_energy
-

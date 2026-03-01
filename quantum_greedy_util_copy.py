@@ -613,7 +613,133 @@ def greedy_remove_most_noncommuting(
     energy=n-len(unfixed)
     return fixed, energy
 
+def greedy_two_phase_vertex_elimination_dynamic(
+    G,
+    c,
+    C,
+    p=1,
+    shots=None,
+    initial_beta=np.pi / 4,
+):
+    """
+    Two-phase greedy rounding WITH vertex elimination.
 
+    When β_v = 0:
+        - vertex is removed from graph
+        - circuit rebuilt on reduced graph
+        - previous assignments preserved
+
+    Returns:
+        best_configuration, best_energy
+    """
+
+    import numpy as np
+    from qiskit.circuit import Parameter
+
+    # --------------------------------------------------
+    # bookkeeping
+    # --------------------------------------------------
+    original_vertices = list(G.nodes())
+
+    active_graph = G.copy()
+    fixed_values = {}              # eliminated vertices (β=0)
+    values = {v: initial_beta for v in original_vertices}
+
+    global_energy = np.inf
+    global_vertices = None
+
+    # ==================================================
+    # PHASE 1 — quadratic fixing
+    # ==================================================
+    while len(active_graph.nodes()) > 0:
+
+        active_nodes = list(active_graph.nodes())
+
+        # rebuild parameters + circuit
+        betas = {v: Parameter(f"β_{v}") for v in active_nodes}
+        qc = mixer_from_graph(active_graph, c, betas=betas, p=p)
+
+        best_energy = np.inf
+        best_vertex = None
+        best_value = None
+
+        # ----------------------------------------------
+        # test candidates
+        # ----------------------------------------------
+        for v in active_nodes:
+
+            for candidate in (0, np.pi / 2):
+
+                trial_vals = values.copy()
+                trial_vals[v] = candidate
+
+                E = expectation_value_cost_shifted(
+                    qc, betas, C, trial_vals, shots
+                )
+
+                if E < best_energy:
+                    best_energy = E
+                    best_vertex = v
+                    best_value = candidate
+
+        # ----------------------------------------------
+        # apply best move
+        # ----------------------------------------------
+        values[best_vertex] = best_value
+
+        # TRUE elimination step
+        if best_value == 0:
+            fixed_values[best_vertex] = 0
+            active_graph.remove_node(best_vertex)
+
+        if best_energy < global_energy:
+            global_energy = best_energy
+            global_vertices = values.copy()
+
+    print("Phase 1 complete. Energy:", global_energy)
+
+    # ==================================================
+    # PHASE 2 — greedy elimination
+    # ==================================================
+    # rebuild active graph from π/2 vertices
+    remaining = [v for v in values if values[v] == np.pi / 2]
+    active_graph = G.subgraph(remaining).copy()
+
+    while len(active_graph.nodes()) > 0:
+
+        active_nodes = list(active_graph.nodes())
+
+        betas = {v: Parameter(f"β_{v}") for v in active_nodes}
+        qc = mixer_from_graph(active_graph, c, betas=betas, p=p)
+
+        best_energy = np.inf
+        best_vertex = None
+
+        for v in active_nodes:
+
+            trial_vals = values.copy()
+            trial_vals[v] = 0
+
+            E = expectation_value_cost_shifted(
+                qc, betas, C, trial_vals, shots
+            )
+
+            if E < best_energy:
+                best_energy = E
+                best_vertex = v
+
+        if best_vertex is None:
+            break
+
+        values[best_vertex] = 0
+        active_graph.remove_node(best_vertex)
+
+        if best_energy < global_energy:
+            global_energy = best_energy
+            global_vertices = values.copy()
+
+    print(f"global_energy = {global_energy}")
+    return global_vertices, global_energy
 
 from collections import defaultdict
 def conditional_smc_mvc(G, beta_values, C, k=1, node_order=None, num_particles=100):

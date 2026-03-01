@@ -612,3 +612,106 @@ def greedy_remove_most_noncommuting(
         #print("energy",n-len(unfixed))
     energy=n-len(unfixed)
     return fixed, energy
+
+
+
+from collections import defaultdict
+def conditional_smc_mvc(G, beta_values, C, k=1, node_order=None, num_particles=100):
+    """
+    Sequential Monte Carlo along quantum tree, returns expectation value directly
+    """
+    if node_order is None:
+        node_order = list(G.nodes())
+
+    # Initialize particles: all vertices in cover
+    particles = [{v: 1 for v in G.nodes()} for _ in range(num_particles)]
+
+    for _ in range(k):
+        for v in node_order:
+            theta_v = beta_values[v]/k
+            cos2 = math.cos(theta_v)**2
+            sin2 = math.sin(theta_v)**2
+
+            for p in range(num_particles):
+                assigned = particles[p]
+
+                # Check if removal is allowed (all neighbors still in cover)
+                removable = all(assigned[u] == 1 for u in G.neighbors(v))
+
+                if removable:
+                    # Branch according to quantum amplitudes
+                    choice = random.choices([1, 0], weights=[cos2, sin2])[0]
+                else:
+                    choice = 1
+
+                assigned[v] = choice
+
+
+
+    # Compute expectation value directly
+    exp_val = 0.0
+    for p in range(num_particles):
+        particle_cost = sum(C[v] for v, val in particles[p].items() if val == 1)
+        exp_val += particle_cost/num_particles
+    
+
+    weights = np.ones(num_particles)  # Uniform weights since we compute expectation directly
+    return exp_val, particles
+
+def greedy_optimize_vertex_elimination_n2(
+    G,
+    c,
+    C,
+    beta_values_init,
+    p=1,
+    node_order=None,
+    shots=None
+):
+    n = G.number_of_nodes()
+    betas = {i: Parameter(f"β_{i}") for i in range(n)}
+
+    values = beta_values_init.copy()
+    unfixed = list(range(n))
+    fixed = []
+    global_energy=np.inf
+    global_vertices=None
+    while unfixed:
+        best_vertex = None
+        best_value = None
+        if len(unfixed)==n:
+            best_energy=np.inf
+        else:
+            best_energy = np.inf
+
+        improvement_found = False
+
+        for v in unfixed:
+
+            trial_vals = values.copy()
+            trial_vals[v] = 0   # or try both 0 and 1 if needed
+
+            E,particles=conditional_smc_mvc(G, trial_vals, C, k=1, node_order=node_order, num_particles=shots)
+            #print(E,v)
+
+            if E < best_energy:  # strictly better
+                best_energy = E
+                best_value = 0
+                best_vertex = v
+                improvement_found = True
+        #print(best_vertex)
+        # STOP CONDITION
+        '''
+        if not improvement_found:
+            print("No further improvement possible. Stopping.")
+            break
+        '''
+        if best_energy<global_energy:
+            global_energy=best_energy
+            global_vertices=values
+
+        # Apply best move
+        values[best_vertex] = best_value
+        fixed.append(best_vertex)
+        unfixed.remove(best_vertex)
+    print(global_energy)
+    return global_vertices,global_energy

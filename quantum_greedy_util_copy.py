@@ -851,6 +851,8 @@ def greedy_montecarlo_vertex_elimination_n2_reduced(
 
 import numpy as np
 from qiskit.circuit import Parameter
+import numpy as np
+from qiskit.circuit import Parameter
 
 def greedy_two_phase_vertex_elimination_montecarlo(
     G,
@@ -916,7 +918,7 @@ def greedy_two_phase_vertex_elimination_montecarlo(
                 E = E + len(trial_vals) - len(active_graph.nodes())
 
                 tol = 1e-6
-                if E < best_energy:
+                if E < best_energy-tol:
                     best_energy = E
                     best_vertex = v
                     best_value = candidate
@@ -970,8 +972,9 @@ def greedy_two_phase_vertex_elimination_montecarlo(
 
             # optionally penalize remaining active nodes
             E = E + len(trial_vals) - len(active_graph.nodes())
-
-            if E < best_energy:
+    
+            tol = 1e-6
+            if E < best_energy-tol:
                 best_energy = E
                 best_vertex = v
 

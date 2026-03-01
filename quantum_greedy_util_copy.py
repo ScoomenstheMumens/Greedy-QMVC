@@ -613,6 +613,12 @@ def greedy_remove_most_noncommuting(
     energy=n-len(unfixed)
     return fixed, energy
 
+import numpy as np
+from qiskit.circuit import Parameter
+
+import numpy as np
+from qiskit.circuit import Parameter
+
 def greedy_two_phase_vertex_elimination_dynamic(
     G,
     c,
@@ -633,9 +639,6 @@ def greedy_two_phase_vertex_elimination_dynamic(
         best_configuration, best_energy
     """
 
-    import numpy as np
-    from qiskit.circuit import Parameter
-
     # --------------------------------------------------
     # bookkeeping
     # --------------------------------------------------
@@ -651,7 +654,9 @@ def greedy_two_phase_vertex_elimination_dynamic(
     # ==================================================
     # PHASE 1 — quadratic fixing
     # ==================================================
-    while len(active_graph.nodes()) > 0:
+    unfixed = set(active_graph.nodes())
+
+    while unfixed:
 
         active_nodes = list(active_graph.nodes())
 
@@ -664,30 +669,30 @@ def greedy_two_phase_vertex_elimination_dynamic(
         best_value = None
 
         # ----------------------------------------------
-        # test candidates
+        # evaluate all candidates for unfixed vertices
         # ----------------------------------------------
-        for v in active_nodes:
-
+        for v in unfixed:
             for candidate in (0, np.pi / 2):
-
                 trial_vals = values.copy()
                 trial_vals[v] = candidate
 
-                E = expectation_value_cost_shifted(
-                    qc, betas, C, trial_vals, shots
-                )
-
-                if E < best_energy:
+                E = expectation_value_cost_shifted(qc, betas, C, trial_vals, shots)
+                tol = 1e-6
+                if E < best_energy - tol:  # Use tolerance to avoid numerical issues   
                     best_energy = E
                     best_vertex = v
                     best_value = candidate
 
-        # ----------------------------------------------
-        # apply best move
-        # ----------------------------------------------
-        values[best_vertex] = best_value
+        # ----- stopping condition -----
+        if best_vertex is None:
+            print("No improving move found. Stopping Phase 1.")
+            break
 
-        # TRUE elimination step
+        # ----- fix one vertex per iteration -----
+        values[best_vertex] = best_value
+        unfixed.remove(best_vertex)
+
+        # eliminate from graph only if β=0
         if best_value == 0:
             fixed_values[best_vertex] = 0
             active_graph.remove_node(best_vertex)
@@ -697,18 +702,17 @@ def greedy_two_phase_vertex_elimination_dynamic(
             global_vertices = values.copy()
 
     print("Phase 1 complete. Energy:", global_energy)
+    print("Remaining vertices after Phase 1 (β=π/2):", [v for v in values if values[v] == np.pi/2])
 
     # ==================================================
     # PHASE 2 — greedy elimination
     # ==================================================
-    # rebuild active graph from π/2 vertices
     remaining = [v for v in values if values[v] == np.pi / 2]
     active_graph = G.subgraph(remaining).copy()
 
     while len(active_graph.nodes()) > 0:
 
         active_nodes = list(active_graph.nodes())
-
         betas = {v: Parameter(f"β_{v}") for v in active_nodes}
         qc = mixer_from_graph(active_graph, c, betas=betas, p=p)
 
@@ -716,15 +720,12 @@ def greedy_two_phase_vertex_elimination_dynamic(
         best_vertex = None
 
         for v in active_nodes:
-
             trial_vals = values.copy()
             trial_vals[v] = 0
 
-            E = expectation_value_cost_shifted(
-                qc, betas, C, trial_vals, shots
-            )
-
-            if E < best_energy:
+            E = expectation_value_cost_shifted(qc, betas, C, trial_vals, shots)
+            tol=10e-6
+            if E < best_energy-tol:
                 best_energy = E
                 best_vertex = v
 
@@ -740,7 +741,6 @@ def greedy_two_phase_vertex_elimination_dynamic(
 
     print(f"global_energy = {global_energy}")
     return global_vertices, global_energy
-
 from collections import defaultdict
 def conditional_smc_mvc(G, beta_values, C, k=1, node_order=None, num_particles=100):
     """
@@ -847,3 +847,143 @@ def greedy_montecarlo_vertex_elimination_n2_reduced(
         #print(current_graph.edges())
     print("Global energy:", global_energy)
     return global_energy
+
+
+import numpy as np
+from qiskit.circuit import Parameter
+
+def greedy_two_phase_vertex_elimination_montecarlo(
+    G,
+    c,
+    C,
+    p=1,
+    shots=None,
+    initial_beta=np.pi / 4,
+):
+    """
+    Two-phase greedy rounding WITH vertex elimination.
+
+    When β_v = 0:
+        - vertex is removed from graph
+        - circuit rebuilt on reduced graph
+        - previous assignments preserved
+
+    Returns:
+        best_configuration, best_energy
+    """
+
+    # --------------------------------------------------
+    # bookkeeping
+    # --------------------------------------------------
+    original_vertices = list(G.nodes())
+
+    active_graph = G.copy()
+    fixed_values = {}              # eliminated vertices (β=0)
+    values = {v: initial_beta for v in original_vertices}
+
+    global_energy = np.inf
+    global_vertices = None
+
+    # ==================================================
+    # PHASE 1 — quadratic fixing
+    # ==================================================
+    unfixed = set(active_graph.nodes())
+
+    while unfixed:
+
+        active_nodes = list(active_graph.nodes())
+
+        best_energy = np.inf
+        best_vertex = None
+        best_value = None
+
+        # evaluate ALL candidates
+        for v in unfixed:
+
+            for candidate in (0, np.pi / 2):
+
+                trial_vals = values.copy()
+                trial_vals[v] = candidate
+
+                E, particles = conditional_smc_mvc(
+                    active_graph,
+                    trial_vals,
+                    C,
+                    k=1,
+                    node_order=None,
+                    num_particles=shots,
+                )
+                E = E + len(trial_vals) - len(active_graph.nodes())
+
+                tol = 1e-6
+                if E < best_energy:
+                    best_energy = E
+                    best_vertex = v
+                    best_value = candidate
+
+        # ----- stopping condition -----
+        if best_vertex is None:
+            print("No improving move found, stopping Phase 1.")
+            break
+
+        # ----- fix one vertex -----
+        values[best_vertex] = best_value
+        unfixed.remove(best_vertex)
+
+        # eliminate only if β=0
+        if best_value == 0:
+            fixed_values[best_vertex] = 0
+            active_graph.remove_node(best_vertex)
+
+        if best_energy < global_energy:
+            global_energy = best_energy
+            global_vertices = values.copy()
+
+    print("Phase 1 complete. Energy:", global_energy)
+    print("Remaining vertices after Phase 1 (β=π/2):", [v for v in values if values[v] == np.pi/2])
+
+    # ==================================================
+    # PHASE 2 — greedy elimination
+    # ==================================================
+    remaining = [v for v in values if values[v] == np.pi / 2]
+    active_graph = G.subgraph(remaining).copy()
+
+    while len(active_graph.nodes()) > 0:
+
+        active_nodes = list(active_graph.nodes())
+        best_energy = np.inf
+        best_vertex = None
+
+        for v in active_nodes:
+
+            trial_vals = values.copy()
+            trial_vals[v] = 0
+
+            E, particles = conditional_smc_mvc(
+                active_graph,
+                trial_vals,
+                C,
+                k=1,
+                node_order=None,
+                num_particles=shots,
+            )
+
+            # optionally penalize remaining active nodes
+            E = E + len(trial_vals) - len(active_graph.nodes())
+
+            if E < best_energy:
+                best_energy = E
+                best_vertex = v
+
+        if best_vertex is None:
+            break
+
+        values[best_vertex] = 0
+        active_graph.remove_node(best_vertex)
+
+        if best_energy < global_energy:
+            global_energy = best_energy
+            global_vertices = values.copy()
+
+    print(f"global_energy = {global_energy}")
+    return global_vertices, global_energy

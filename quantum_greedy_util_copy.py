@@ -784,60 +784,66 @@ def conditional_smc_mvc(G, beta_values, C, k=1, node_order=None, num_particles=1
     weights = np.ones(num_particles)  # Uniform weights since we compute expectation directly
     return exp_val, particles
 
-def greedy_optimize_vertex_elimination_n2(
+def greedy_montecarlo_vertex_elimination_n2_reduced(
     G,
-    c,
     C,
     beta_values_init,
-    p=1,
     node_order=None,
-    shots=None
+    p=1,
+    shots=None,
 ):
-    n = G.number_of_nodes()
-    betas = {i: Parameter(f"β_{i}") for i in range(n)}
-
+    G = nx.convert_node_labels_to_integers(G)
+    
+    # Keep original labels mapping
+    original_nodes = list(G.nodes())
+    
     values = beta_values_init.copy()
-    unfixed = list(range(n))
-    fixed = []
-    global_energy=np.inf
-    global_vertices=None
-    while unfixed:
+    global_energy = np.inf
+    global_vertices = values.copy()
+    
+    current_graph = G.copy()
+    
+    while current_graph.number_of_nodes() > 0:
+        
+        n = current_graph.number_of_nodes()
+        current_nodes = list(current_graph.nodes())
+        
+        # Rebuild parameters only for active nodes
+        betas = {i: Parameter(f"β_{i}") for i in current_nodes}
+        C = {i: 1.0 for i in current_graph.nodes()}
+        new_order=node_order_by_cost_degree(current_graph,C)
+        # Build mixer on reduced graph
+
+        best_energy = np.inf
         best_vertex = None
-        best_value = None
-        if len(unfixed)==n:
-            best_energy=np.inf
-        else:
-            best_energy = np.inf
 
-        improvement_found = False
-
-        for v in unfixed:
+        for v in current_nodes:
 
             trial_vals = values.copy()
-            trial_vals[v] = 0   # or try both 0 and 1 if needed
+            trial_vals[v] = 0
+            E,particles=conditional_smc_mvc(current_graph, trial_vals, C, k=1, node_order=new_order, num_particles=shots)
+            E=E+len(beta_values_init)-len(current_graph.nodes())
 
-            E,particles=conditional_smc_mvc(G, trial_vals, C, k=1, node_order=node_order, num_particles=shots)
-            #print(E,v)
-
-            if E < best_energy:  # strictly better
+            if E < best_energy:
                 best_energy = E
-                best_value = 0
                 best_vertex = v
-                improvement_found = True
-        #print(best_vertex)
-        # STOP CONDITION
-        '''
-        if not improvement_found:
-            print("No further improvement possible. Stopping.")
-            break
-        '''
-        if best_energy<global_energy:
-            global_energy=best_energy
-            global_vertices=values
 
-        # Apply best move
-        values[best_vertex] = best_value
-        fixed.append(best_vertex)
-        unfixed.remove(best_vertex)
-    print(global_energy)
-    return global_vertices,global_energy
+        # Update global best
+        if best_energy < global_energy:
+            global_energy = best_energy
+            global_vertices = values.copy()
+
+        # Fix chosen vertex
+        del values[len(current_graph.nodes())-1]  # Remove last entry which corresponds to the removed vertex
+
+        # Remove vertex from graph (and all edges)
+        current_graph.remove_node(best_vertex)
+        #print(best_vertex)
+        #print(current_graph.nodes())
+        #print(current_graph.edges())
+        mapping = {old: new for new, old in enumerate(current_graph.nodes())}
+        current_graph = nx.relabel_nodes(current_graph, mapping)
+        #print(current_graph.nodes())
+        #print(current_graph.edges())
+    print("Global energy:", global_energy)
+    return global_energy

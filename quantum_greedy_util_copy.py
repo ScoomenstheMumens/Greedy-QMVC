@@ -619,129 +619,7 @@ from qiskit.circuit import Parameter
 import numpy as np
 from qiskit.circuit import Parameter
 
-def greedy_two_phase_vertex_elimination_dynamic(
-    G,
-    c,
-    C,
-    p=1,
-    shots=None,
-    initial_beta=np.pi / 4,
-):
-    """
-    Two-phase greedy rounding WITH vertex elimination.
 
-    When β_v = 0:
-        - vertex is removed from graph
-        - circuit rebuilt on reduced graph
-        - previous assignments preserved
-
-    Returns:
-        best_configuration, best_energy
-    """
-
-    # --------------------------------------------------
-    # bookkeeping
-    # --------------------------------------------------
-    original_vertices = list(G.nodes())
-
-    active_graph = G.copy()
-    fixed_values = {}              # eliminated vertices (β=0)
-    values = {v: initial_beta for v in original_vertices}
-
-    global_energy = np.inf
-    global_vertices = None
-
-    # ==================================================
-    # PHASE 1 — quadratic fixing
-    # ==================================================
-    unfixed = set(active_graph.nodes())
-
-    while unfixed:
-
-        active_nodes = list(active_graph.nodes())
-
-        # rebuild parameters + circuit
-        betas = {v: Parameter(f"β_{v}") for v in active_nodes}
-        qc = mixer_from_graph(active_graph, c, betas=betas, p=p)
-
-        best_energy = np.inf
-        best_vertex = None
-        best_value = None
-
-        # ----------------------------------------------
-        # evaluate all candidates for unfixed vertices
-        # ----------------------------------------------
-        for v in unfixed:
-            for candidate in (0, np.pi / 2):
-                trial_vals = values.copy()
-                trial_vals[v] = candidate
-
-                E = expectation_value_cost_shifted(qc, betas, C, trial_vals, shots)
-                tol = 1e-6
-                if E < best_energy - tol:  # Use tolerance to avoid numerical issues   
-                    best_energy = E
-                    best_vertex = v
-                    best_value = candidate
-
-        # ----- stopping condition -----
-        if best_vertex is None:
-            print("No improving move found. Stopping Phase 1.")
-            break
-
-        # ----- fix one vertex per iteration -----
-        values[best_vertex] = best_value
-        unfixed.remove(best_vertex)
-
-        # eliminate from graph only if β=0
-        if best_value == 0:
-            fixed_values[best_vertex] = 0
-            active_graph.remove_node(best_vertex)
-
-        if best_energy < global_energy:
-            global_energy = best_energy
-            global_vertices = values.copy()
-
-    print("Phase 1 complete. Energy:", global_energy)
-    print("Remaining vertices after Phase 1 (β=π/2):", [v for v in values if values[v] == np.pi/2])
-
-    # ==================================================
-    # PHASE 2 — greedy elimination
-    # ==================================================
-    remaining = [v for v in values if values[v] == np.pi / 2]
-    active_graph = G.subgraph(remaining).copy()
-
-    while len(active_graph.nodes()) > 0:
-
-        active_nodes = list(active_graph.nodes())
-        betas = {v: Parameter(f"β_{v}") for v in active_nodes}
-        qc = mixer_from_graph(active_graph, c, betas=betas, p=p)
-
-        best_energy = np.inf
-        best_vertex = None
-
-        for v in active_nodes:
-            trial_vals = values.copy()
-            trial_vals[v] = 0
-
-            E = expectation_value_cost_shifted(qc, betas, C, trial_vals, shots)
-            tol=10e-6
-            if E < best_energy-tol:
-                best_energy = E
-                best_vertex = v
-
-        if best_vertex is None:
-            break
-
-        values[best_vertex] = 0
-        active_graph.remove_node(best_vertex)
-
-        if best_energy < global_energy:
-            global_energy = best_energy
-            global_vertices = values.copy()
-
-    print(f"global_energy = {global_energy}")
-    return global_vertices, global_energy
-from collections import defaultdict
 def conditional_smc_mvc(G, beta_values, C, k=1, node_order=None, num_particles=100):
     """
     Sequential Monte Carlo along quantum tree, returns expectation value directly
@@ -989,4 +867,172 @@ def greedy_two_phase_vertex_elimination_montecarlo(
             global_vertices = values.copy()
 
     print(f"global_energy = {global_energy}")
+    return global_vertices, global_energy
+
+
+import numpy as np
+import networkx as nx
+from qiskit.circuit import Parameter
+
+# ==========================================================
+# RELABELING UTILITY (graph, values, unfixed, c)
+# ==========================================================
+def relabel_graph_state(G, values, unfixed, c):
+    """
+    Relabel EVERYTHING consistently:
+        graph
+        values
+        unfixed
+        weight dict c
+    """
+    nodes = list(G.nodes())
+    forward = {old: i for i, old in enumerate(nodes)}
+    inverse = {i: old for old, i in forward.items()}
+
+    # ---- graph ----
+    G_new = nx.relabel_nodes(G, forward, copy=True)
+    # ---- values ----
+    values_new = {forward[v]: val for v, val in values.items() if v in forward}
+    # ---- unfixed ----
+    unfixed_new = {forward[v] for v in unfixed if v in forward}
+    # ---- weights c ----
+    c_new = {forward[v]: w for v, w in c.items() if v in forward}
+
+    return G_new, values_new, unfixed_new, c_new, forward, inverse
+
+# ==========================================================
+# PHASE 1 STEP (0 or pi/2)
+# ==========================================================
+def fix_vertex_two_options(OG,G, c, C, values, unfixed, p=1, shots=None):
+    # ----- relabel EVERYTHING -----
+    G, values, unfixed, c, forward, inverse = relabel_graph_state(G, values, unfixed, c)
+
+    active_nodes = list(G.nodes())
+    betas = {v: Parameter(f"β_{v}") for v in active_nodes}
+    qc = mixer_from_graph(G, c, betas=betas, p=p)
+
+    best_energy = np.inf
+    best_vertex = None
+    best_value = None
+    tol = 1e-6
+
+    for v in unfixed:
+        for candidate in (0, np.pi / 2):
+            # only keep current nodes in trial_vals
+            trial_vals = {vv: values[vv] for vv in G.nodes()}
+            trial_vals[v] = candidate
+
+            E = expectation_value_cost_shifted(qc, betas, c, trial_vals, shots)
+            E=E+len(OG.nodes())-len(G.nodes())
+            if E <= best_energy:
+                best_energy = E
+                best_vertex = v
+                best_value = candidate
+
+    # apply fixing
+    new_graph = G.copy()
+    new_values = values.copy()
+    new_unfixed = set(unfixed)
+
+    new_values[best_vertex] = best_value
+    new_unfixed.discard(best_vertex)
+
+    if best_value == 0:
+        new_graph.remove_node(best_vertex)
+        new_values.pop(best_vertex, None)
+
+    # ----- map back to original labels -----
+    new_graph = nx.relabel_nodes(new_graph, inverse, copy=True)
+    new_values = {inverse[v]: val for v, val in new_values.items()}
+    new_unfixed = {inverse[v] for v in new_unfixed}
+    best_vertex = inverse[best_vertex]
+
+    return new_graph, new_values, new_unfixed, best_energy, best_vertex, best_value
+
+# ==========================================================
+# PHASE 2 STEP (only 0)
+# ==========================================================
+def fix_vertex_one_option(OG,G, c, C, values, unfixed, p=1, shots=None):
+    if len(G.nodes()) == 0:
+        return G, values, unfixed, None, None
+
+    # ----- relabel EVERYTHING -----
+    G, values, unfixed, c, forward, inverse = relabel_graph_state(G, values, unfixed, c)
+
+    active_nodes = list(G.nodes())
+    betas = {v: Parameter(f"β_{v}") for v in active_nodes}
+    qc = mixer_from_graph(G, c, betas=betas, p=p)
+
+    best_energy = np.inf
+    best_vertex = None
+    tol = 1e-6
+
+    for v in active_nodes:
+        # only keep current nodes in trial_vals
+        trial_vals = {vv: values[vv] for vv in G.nodes()}
+        trial_vals[v] = 0
+
+        E = expectation_value_cost_shifted(qc, betas, c, trial_vals, shots)
+        E=E+len(OG.nodes())-len(G.nodes())
+        if E < best_energy:
+            best_energy = E
+            best_vertex = v
+
+    if best_vertex is None:
+        return G, values, unfixed, None, None
+
+    new_graph = G.copy()
+    new_graph.remove_node(best_vertex)
+
+    new_values = values.copy()
+    new_values.pop(best_vertex, None)
+
+    new_unfixed = set(unfixed)
+    new_unfixed.discard(best_vertex)
+
+    # ----- map back -----
+    new_graph = nx.relabel_nodes(new_graph, inverse, copy=True)
+    new_values = {inverse[v]: val for v, val in new_values.items()}
+    new_unfixed = {inverse[v] for v in new_unfixed}
+    best_vertex = inverse[best_vertex]
+
+    return new_graph, new_values, new_unfixed, best_energy, best_vertex
+
+# ==========================================================
+# FULL GREEDY ALGORITHM
+# ==========================================================
+def greedy_two_phase_vertex_elimination_dynamic(G, c, C, p=1, shots=None, initial_beta=np.pi/4):
+    active_graph = G.copy()
+    values = {v: initial_beta for v in G.nodes()}
+    unfixed = set(G.nodes())
+
+    global_energy = np.inf
+    global_vertices = values.copy()
+
+    # ================= PHASE 1 =================
+    while unfixed:
+        active_graph, values, unfixed, energy, vertex, value = fix_vertex_two_options(
+            G,active_graph, c, C, values, unfixed, p, shots
+        )
+        if vertex is None:
+            print("No improving move found. Stopping Phase 1.")
+            break
+        if energy < global_energy:
+            global_energy = energy
+            global_vertices = values.copy()
+
+
+    # ================= PHASE 2 =================
+    unfixed = set(active_graph.nodes())
+    while unfixed:
+        active_graph, values, unfixed, energy, vertex = fix_vertex_one_option(G,
+            active_graph, c, C, values, unfixed, p, shots
+        )
+        if vertex is None:
+            break
+        if energy < global_energy:
+            global_energy = energy
+            global_vertices = values.copy()
+
+    print("Phase 2 complete. Energy:", global_energy)
     return global_vertices, global_energy

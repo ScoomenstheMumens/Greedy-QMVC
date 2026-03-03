@@ -1036,3 +1036,122 @@ def greedy_two_phase_vertex_elimination_dynamic(G, c, C, p=1, shots=None, initia
 
     print("Phase 2 complete. Energy:", global_energy)
     return global_vertices, global_energy
+
+
+def qubit_one_probabilities(qc, shots=None):
+    """
+    Returns p_i = <(1 - Z_i)/2> for all qubits.
+    """
+
+    n = qc.num_qubits
+
+    if shots is None:
+        psi = Statevector.from_instruction(qc)
+        probs = []
+
+        for i in range(n):
+            pauli = ["I"] * n
+            pauli[n-i-1] = "Z"
+            Zi = SparsePauliOp("".join(pauli), [1.0])
+
+            expZ = psi.expectation_value(Zi).real
+            probs.append((1 - expZ) / 2)
+
+        return np.array(probs)
+
+    # ---- shot-based ----
+    qc_meas = qc.copy()
+    qc_meas.measure_all()
+
+    backend = Aer.get_backend("aer_simulator")
+    qc_meas = transpile(qc_meas, backend)
+    counts = backend.run(qc_meas, shots=shots).result().get_counts()
+
+    probs = np.zeros(n)
+
+    for bitstring, count in counts.items():
+        weight = count / shots
+        bits = bitstring[::-1]
+
+        for i, b in enumerate(bits):
+            if b == "1":
+                probs[i] += weight
+
+    return probs
+
+
+def mixer_fixed_beta(G, p=1, node_order=None):
+    G = nx.convert_node_labels_to_integers(G)
+    n = G.number_of_nodes()
+
+    qc = QuantumCircuit(n)
+
+    # initial layer
+    qc.x(range(n))
+
+    if node_order is None:
+        C = {i: 1.0 for i in G.nodes()}
+        node_order = node_order_by_cost_degree(G, C)
+
+    beta = np.pi /2
+
+    for _ in range(p):
+        for tgt in node_order:
+            angle = 2 * beta / p
+            ctrls = list(G.neighbors(tgt))
+
+            if ctrls:
+                qc.append(RXGate(angle).control(len(ctrls)),
+                          ctrls + [tgt])
+            else:
+                qc.rx(angle, tgt)
+
+    return qc
+
+
+def quantum_greedy_vertex_elimination(
+    G,
+    p=1,
+    shots=None,
+    tol=1e-6
+):
+    """
+    Parameter-free quantum greedy elimination.
+
+    Returns:
+        cost = number of removed vertices
+    """
+
+    G = nx.convert_node_labels_to_integers(G)
+    current_graph = G.copy()
+
+    removed_vertices = []
+
+    while current_graph.number_of_nodes() > 0:
+
+        # build circuit
+        qc = mixer_fixed_beta(current_graph, p=p)
+
+        # compute probabilities
+        probs = qubit_one_probabilities(qc, shots=shots)
+
+        # stopping condition:
+        if np.max(probs) - np.min(probs) < tol:
+            break
+
+        # select vertex with highest probability
+        remove_idx = int(np.argmax(probs))
+        removed_vertices.append(remove_idx)
+
+        # remove vertex
+        current_graph.remove_node(remove_idx)
+
+        # relabel graph
+        mapping = {old: new for new, old
+                   in enumerate(current_graph.nodes())}
+        current_graph = nx.relabel_nodes(current_graph, mapping)
+
+    cost = len(removed_vertices)
+
+    #rint("Quantum greedy cost:", cost)
+    return cost

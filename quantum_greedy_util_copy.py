@@ -1155,3 +1155,81 @@ def quantum_greedy_vertex_elimination(
 
     #rint("Quantum greedy cost:", cost)
     return cost
+
+
+def particle_probabilities(particles):
+    """Estimate marginal probabilities from particles."""
+    nodes = particles[0].keys()
+    probs = {}
+
+    for v in nodes:
+        probs[v] = np.mean([p[v] for p in particles])
+
+    return probs
+
+
+def quantum_greedy_vertex_elimination_montecarlo(
+    G,
+    p=1,
+    shots=100,
+    tol=1e-6
+):
+    """
+    Parameter-free quantum greedy elimination.
+
+    Returns:
+        cost = number of removed vertices
+    """
+
+    current_graph = nx.convert_node_labels_to_integers(G).copy()
+    removed_vertices = []
+
+    while current_graph.number_of_nodes() > 0:
+
+        # parameters for current graph
+        beta_values = {
+            v: math.pi / 2 for v in current_graph.nodes()
+        }
+
+        C = {v: 1 for v in current_graph.nodes()}
+
+        node_order = node_order_by_cost_degree(
+            current_graph, C
+        )
+
+        # SMC sampling
+        energy, particles = conditional_smc_mvc(
+            current_graph,
+            beta_values,
+            C,
+            k=p,
+            node_order=node_order,
+            num_particles=shots
+        )
+
+        # compute marginal probabilities
+        probs_dict = particle_probabilities(particles)
+        probs = np.array([probs_dict[v]
+                          for v in current_graph.nodes()])
+
+        # stopping condition
+        if np.max(probs) - np.min(probs) < tol:
+            break
+
+        # choose vertex most likely in cover
+        remove_idx = int(np.argmax(probs))
+        removed_vertices.append(remove_idx)
+
+        # remove from graph
+        current_graph.remove_node(remove_idx)
+
+        # relabel nodes
+        mapping = {
+            old: new
+            for new, old in enumerate(current_graph.nodes())
+        }
+        current_graph = nx.relabel_nodes(
+            current_graph, mapping
+        )
+
+    return len(removed_vertices)

@@ -11,7 +11,7 @@ try:
 except ImportError:
     rx = None
     RxGraph = tuple()
-
+import numpy as np 
 # Qiskit imports
 from qiskit import QuantumCircuit
 from qiskit.circuit import Parameter
@@ -21,7 +21,7 @@ from qiskit_aer import Aer
 from qiskit import transpile
 
 from collections import defaultdict
-
+from classical_runtime_guarantee_util import greedy_degree_vertex_cover
 from util_greedy import mixer_from_graph,mixer_from_graph_subset,node_order_by_cost_degree, expectation_value_cost_shifted,echo_commutator_circuit,echo_fidelity,mixer_fixed_beta,qubit_one_probabilities
 
 
@@ -32,10 +32,11 @@ from util_greedy import mixer_from_graph,mixer_from_graph_subset,node_order_by_c
 # Greedy vertex elimination
 # ---------------------------------------------------------
 
-def quantum_vertex_greedy(
+def quantum_vertex_greedy_maximum(
     G,
     p=1,
     shots=None,
+    beta=None,
     tol=1e-8
 ):
     """
@@ -47,13 +48,22 @@ def quantum_vertex_greedy(
 
     G = nx.convert_node_labels_to_integers(G)
     current_graph = G.copy()
-
+    c = {i: 1.0 for i in G.nodes()}
     removed_vertices = []
-
-    while current_graph.number_of_nodes() > 0:
+    
+    while current_graph.number_of_edges() > 0:
+        if beta is None:
+            n=len(current_graph.nodes())
+            greedy_cover=greedy_degree_vertex_cover(current_graph, c)
+            c = {i: 1.0 for i in current_graph.nodes()}
+            cost_cover=len(greedy_cover)+1
+            beta_trial=np.arctan((cost_cover/(n-cost_cover)))
+            #print(beta_trial)
+        else:
+            beta_trial=beta
 
         # build circuit
-        qc = mixer_fixed_beta(current_graph, p=p)
+        qc = mixer_fixed_beta(current_graph, beta=beta_trial,p=p)
 
         # compute probabilities
         probs = qubit_one_probabilities(qc, shots=shots)
@@ -78,6 +88,77 @@ def quantum_vertex_greedy(
 
     #print("Quantum greedy cost:", cost)
     return cost
+
+
+def quantum_vertex_greedy_minimum(
+    G,
+    p=1,
+    shots=None,
+    beta=None,
+    tol=1e-8
+):
+
+    """
+    Quantum greedy variant:
+    - pick vertex with MIN probability of being 1
+    - add its neighbors to vertex cover
+    - remove the vertex and all its neighbors
+
+    Stopping condition:
+        stop when there are no more edges
+
+    Returns:
+        cost = size of constructed vertex cover
+    """
+
+    G = nx.convert_node_labels_to_integers(G)
+    current_graph = G.copy()
+    vertex_cover = 0
+
+    while current_graph.number_of_edges() > 0:
+
+        if beta is None:
+            n = len(current_graph.nodes())
+            greedy_cover = greedy_degree_vertex_cover(
+                current_graph,
+                {i: 1.0 for i in current_graph.nodes()}
+            )
+            cost_cover = len(greedy_cover) 
+            #print(cost_cover)
+            beta_trial = np.arctan((cost_cover / (n - cost_cover)))
+        else:
+            beta_trial = beta
+
+        # build circuit
+        qc = mixer_fixed_beta(current_graph, beta=beta_trial, p=p)
+
+        # compute probabilities
+        probs = qubit_one_probabilities(qc, shots=shots)
+
+        # optional: keep this as a safety stop
+        if np.max(probs) - np.min(probs) < tol:
+            break
+
+        # select vertex with MIN probability
+        v = int(np.argmin(probs))
+
+        # get neighbors BEFORE removal
+        neighbors = list(current_graph.neighbors(v))
+
+        # add neighbors to vertex cover
+        vertex_cover += len(neighbors)
+        #print(vertex_cover)
+        # remove v and its neighbors
+        nodes_to_remove = set(neighbors)
+        nodes_to_remove.add(v)
+        current_graph.remove_nodes_from(nodes_to_remove)
+
+        # relabel graph
+        mapping = {old: new for new, old in enumerate(current_graph.nodes())}
+        current_graph = nx.relabel_nodes(current_graph, mapping)
+    #vertex_cover.update(current_graph.nodes())
+    #print(len(vertex_cover))
+    return vertex_cover
 
 
 
@@ -147,16 +228,16 @@ def Quadratic_quantum_greedy(
         fixed.append(best_vertex)
         unfixed.remove(best_vertex)
 
-    return global_vertices,global_energy
+    return global_energy
 
 
 
 
-def Commuting_quantum_greedy(
+def Commuting_quantum_greedy_minimum(
     G,
     c,
-    betas,
-    beta_values,
+    betas_1,
+    betas_2=None,
     p=1,
     shots=None,
 ):
@@ -166,8 +247,6 @@ def Commuting_quantum_greedy(
     """
 
     n = G.number_of_nodes()
-    values = beta_values.copy()
-
     unfixed = list(range(n))
     fixed = []
 
@@ -187,12 +266,13 @@ def Commuting_quantum_greedy(
                 c,
                 active_nodes=trial_active,
                 trial_node=v,
-                betas=betas,
+                betas_1=betas_1,
+                betas_2=betas_2,
                 p=p,
             )
 
-            F = echo_fidelity(qc, betas, values, shots)
-            #print(F, v)
+            F = echo_fidelity(qc, shots)
+            print(F, v)
             tol=10e-6
             if F < worst_fidelity-tol:
                 worst_fidelity = F
@@ -208,8 +288,92 @@ def Commuting_quantum_greedy(
         unfixed.remove(best_vertex)
         #print("energy",n-len(unfixed))
     energy=n-len(unfixed)
-    return fixed, energy
+    return energy
 
+def Commuting_quantum_greedy_maximum(
+    G,
+    c,
+    betas_1,
+    betas_2=None,
+    p=1,
+    shots=None,
+):
+    """
+    At each iteration:
+    1. Find the most commuting vertex (largest fidelity < 1)
+    2. Add that vertex + its neighbors to the cover
+    3. Remove them from the graph
+    4. Remap the graph and repeat
+    """
+
+    G_copy = G.copy()
+    fixed = []
+    energy=0
+
+    while G_copy.number_of_edges() > 0:
+
+        # ---- Remap graph ----
+        mapping = {old: new for new, old in enumerate(G_copy.nodes())}
+        reverse_mapping = {v: k for k, v in mapping.items()}
+
+        G_copy = nx.relabel_nodes(G_copy, mapping)
+
+    
+
+        nodes = list(G_copy.nodes())
+
+        best_vertex = None
+        best_fidelity = -1
+
+        # ---- Find most commuting vertex ----
+        for v in nodes:
+
+            trial_active = [u for u in nodes if u != v]
+
+            qc = echo_commutator_circuit(
+                G_copy,
+                c,
+                active_nodes=trial_active,
+                trial_node=v,
+                betas_1=betas_1,
+                betas_2=betas_2,
+                p=p,
+            )
+
+            F = echo_fidelity(qc, shots)
+            print(F,v)
+            tol = 1e-6
+            if F < 1 - tol and F > best_fidelity + tol:
+                best_fidelity = F
+                best_vertex = v
+
+        if best_vertex is None:
+            print("No further commuting structure detected.")
+            break
+
+        # ---- Select vertex + its neighbors ----
+        neighbors = list(G_copy.neighbors(best_vertex))
+        cover_block = [best_vertex] + neighbors
+
+        cover_original = [reverse_mapping[v] for v in cover_block]
+
+        print(
+            f"Chosen vertex: {reverse_mapping[best_vertex]}, "
+            f"adding block to cover: {cover_original}"
+        )
+
+        fixed.extend(cover_original)
+
+        # ---- Remove them from the graph ----
+        G_copy.remove_nodes_from(cover_block)
+        energy+=len(neighbors)
+        print("Edges remaining:", G_copy.number_of_edges())
+
+    
+
+    return energy
+
+# ====================================
 # ==========================================================
 # RELABELING UTILITY (graph, values, unfixed, c)
 # ==========================================================
@@ -310,6 +474,7 @@ def fix_vertex_one_option(OG,G, c, C, values, unfixed, p=1, shots=None):
 
         E = expectation_value_cost_shifted(qc, betas, c, trial_vals, shots)
         E=E+len(OG.nodes())-len(G.nodes())
+        print(E)
         if E < best_energy:
             best_energy = E
             best_vertex = v

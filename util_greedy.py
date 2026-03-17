@@ -102,12 +102,7 @@ def expectation_value_cost_shifted(
         qc_meas = qc_bound.copy()
         qc_meas.measure_all()
         
-        backend = Aer.get_backend("aer_simulator")
-        if backend_method == "matrix_product_state":
-            backend.set_options(method="matrix_product_state")
-            if mps_max_bond is not None:
-                backend.set_options(mps_max_bond_dimension=mps_max_bond)
-        
+        backend = Aer.get_backend("aer_simulator")        
         qc_meas = transpile(qc_meas, backend)
         counts = backend.run(qc_meas, shots=shots).result().get_counts()
         
@@ -122,12 +117,7 @@ def expectation_value_cost_shifted(
 
     # --- Exact simulation ---
     backend = Aer.get_backend("aer_simulator")
-    if backend_method == "matrix_product_state":
-        backend.set_options(method="matrix_product_state")
-        if mps_max_bond is not None:
-            backend.set_options(mps_max_bond_dimension=mps_max_bond)
-    
-    psi = Statevector.from_instruction(qc_bound, backend=backend)
+    psi = Statevector.from_instruction(qc_bound)
     return shift + psi.expectation_value(HZ).real
 
 def mixer_from_graph(
@@ -171,7 +161,7 @@ def mixer_from_graph(
 
     return qc
 
-def mixer_fixed_beta(G, p=1, node_order=None):
+def mixer_fixed_beta(G, p=1, beta=None,node_order=None):
     G = nx.convert_node_labels_to_integers(G)
     n = G.number_of_nodes()
 
@@ -184,7 +174,8 @@ def mixer_fixed_beta(G, p=1, node_order=None):
         C = {i: 1.0 for i in G.nodes()}
         node_order = node_order_by_cost_degree(G, C)
 
-    beta = np.pi / 2
+    if beta == None:
+        beta = np.pi / 4
 
     for _ in range(p):
         for tgt in node_order:
@@ -270,6 +261,7 @@ def circuit_from_graph_commutator(
     trial_node,
     betas,
     p=1,
+    flag=False,
 ):
     """
     Gate order is EXACTLY:
@@ -281,13 +273,26 @@ def circuit_from_graph_commutator(
     G = nx.convert_node_labels_to_integers(G)
     n = G.number_of_nodes()
     qc = QuantumCircuit(n)
-
+    if node_order is None:
+        node_order = node_order_by_cost_degree(G, c)
     # Initial X layer
     for i in range(n):
         qc.x(i)
+    if flag==True:
+        alpha = np.pi / 4
+        p_init=1
+        for _ in range(p_init):
+            for tgt in node_order:
+                angle = 2 * alpha / p
+                ctrls = list(G.neighbors(tgt))
 
-    if node_order is None:
-        node_order = node_order_by_cost_degree(G, c)
+                if ctrls:
+                    qc.append(RXGate(angle).control(len(ctrls)),
+                            ctrls + [tgt])
+                else:
+                    qc.rx(angle, tgt)
+
+    
 
     # ---- ACTIVE (p layers)
     for _ in range(p):
@@ -328,6 +333,19 @@ def circuit_from_graph_commutator(
         qc.rx(angle, tgt)
     
 
+    if flag==True:
+
+        for _ in range(p_init):
+            for tgt in node_order[::-1]:
+                angle = -2 * alpha / p
+                ctrls = list(G.neighbors(tgt))
+
+                if ctrls:
+                    qc.append(RXGate(angle).control(len(ctrls)),
+                            ctrls + [tgt])
+                else:
+                    qc.rx(angle, tgt)
+
     return qc
 
 
@@ -336,14 +354,16 @@ def echo_commutator_circuit(
     c,
     active_nodes,
     trial_node,
-    betas,
+    betas_1,
+    betas_2=None,
     p=1,
 ):
     """
     Parameterized echo circuit:
         U = A B A† B†
     """
-
+    if betas_2==None:
+        betas_2=betas_1
     G = nx.convert_node_labels_to_integers(G)
     n = G.number_of_nodes()
     qc = QuantumCircuit(n)
@@ -355,7 +375,7 @@ def echo_commutator_circuit(
     # ---- A (active p layers)
     for _ in range(p):
         for tgt in active_nodes:
-            angle = 2 * betas[tgt] / p
+            angle = 2 * betas_1/ p
             ctrls = list(G.neighbors(tgt))
             if ctrls:
                 qc.append(RXGate(angle).control(len(ctrls)), ctrls + [tgt])
@@ -364,7 +384,7 @@ def echo_commutator_circuit(
 
     # ---- B (trial)
     tgt = trial_node
-    angle = 2 * betas[tgt]
+    angle = 2 * betas_2
     ctrls = list(G.neighbors(tgt))
     if ctrls:
         qc.append(RXGate(angle).control(len(ctrls)), ctrls + [tgt])
@@ -374,7 +394,7 @@ def echo_commutator_circuit(
     # ---- A†
     for _ in range(p):
         for tgt in active_nodes:
-            angle = -2 * betas[tgt] / p
+            angle = -2 * betas_1 / p
             ctrls = list(G.neighbors(tgt))
             if ctrls:
                 qc.append(RXGate(angle).control(len(ctrls)), ctrls + [tgt])
@@ -383,7 +403,7 @@ def echo_commutator_circuit(
 
     # ---- B†
     tgt = trial_node
-    angle = -2 * betas[tgt]
+    angle = -2 * betas_2
     ctrls = list(G.neighbors(tgt))
     if ctrls:
         qc.append(RXGate(angle).control(len(ctrls)), ctrls + [tgt])
@@ -394,22 +414,12 @@ def echo_commutator_circuit(
 
 def echo_fidelity(
     qc,
-    betas,
-    beta_values,
     shots=None,
     backend_method="matrix_product_state",
     mps_max_bond=20
 ):
 
-    # Bind ONLY parameters present in the circuit
-    present_params = qc.parameters
-    bind_dict = {
-        betas[i]: beta_values[i]
-        for i in betas
-        if betas[i] in present_params
-    }
-
-    qc_bound = qc.assign_parameters(bind_dict)
+    #
 
     n = qc.num_qubits
     target = "1" * n
@@ -417,17 +427,9 @@ def echo_fidelity(
     # -------- shot-based simulation --------
     if shots is not None:
 
-        qc_meas = qc_bound.copy()
+        qc_meas = qc.copy()
         qc_meas.measure_all()
-
         backend = Aer.get_backend("aer_simulator")
-
-        if backend_method == "matrix_product_state":
-            backend.set_options(method="matrix_product_state")
-            print("mps")
-            if mps_max_bond is not None:
-                backend.set_options(matrix_product_state_max_bond_dimension=mps_max_bond)
-
         qc_meas = transpile(qc_meas, backend)
         counts = backend.run(qc_meas, shots=shots).result().get_counts()
 
@@ -435,13 +437,7 @@ def echo_fidelity(
 
     # -------- exact simulation --------
     backend = Aer.get_backend("aer_simulator")
-
-    if backend_method == "matrix_product_state":
-        backend.set_options(method="matrix_product_state")
-        if mps_max_bond is not None:
-            backend.set_options(mps_max_bond_dimension=mps_max_bond)
-
-    psi = Statevector.from_instruction(qc_bound, backend=backend)
+    psi = Statevector.from_instruction(qc)
 
     return psi.probabilities_dict().get(target, 0.0)
 
@@ -466,12 +462,6 @@ def qubit_one_probabilities(
         qc_meas.measure_all()
 
         backend = Aer.get_backend("aer_simulator")
-
-        if backend_method == "matrix_product_state":
-            backend.set_options(method="matrix_product_state")
-            if mps_max_bond is not None:
-                backend.set_options(mps_max_bond_dimension=mps_max_bond)
-
         qc_meas = transpile(qc_meas, backend)
         counts = backend.run(qc_meas, shots=shots).result().get_counts()
 

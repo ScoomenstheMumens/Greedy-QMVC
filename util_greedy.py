@@ -355,15 +355,13 @@ def echo_commutator_circuit(
     active_nodes,
     trial_node,
     betas_1,
-    betas_2=None,
+    betas_2,
     p=1,
 ):
     """
     Parameterized echo circuit:
         U = A B A† B†
     """
-    if betas_2==None:
-        betas_2=betas_1
     G = nx.convert_node_labels_to_integers(G)
     n = G.number_of_nodes()
     qc = QuantumCircuit(n)

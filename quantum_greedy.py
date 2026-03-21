@@ -231,13 +231,262 @@ def Quadratic_quantum_greedy(
     return global_energy
 
 
+import numpy as np
+import networkx as nx
+
+def Quadratic_quantum_greedy_minimum(
+    G,
+    p=1,
+    shots=None,
+    beta=None,
+    tol=1e-8
+):
+    """
+    Quantum greedy variant:
+    - pick vertex with MAX "energy"
+    - add its neighbors to vertex cover
+    - remove the vertex and all its neighbors
+
+    Stopping condition:
+        stop when there are no more edges
+
+    Returns:
+        cost = size of constructed vertex cover
+    """
+
+    G = nx.convert_node_labels_to_integers(G)
+    current_graph = G.copy()
+    vertex_cover = 0
+
+    while current_graph.number_of_edges() > 0:
+
+        n = len(current_graph.nodes())
+
+        # --- beta selection (same logic as yours) ---
+        if beta is None:
+            greedy_cover = greedy_degree_vertex_cover(
+                current_graph,
+                {i: 1.0 for i in current_graph.nodes()}
+            )
+            cost_cover = len(greedy_cover)
+            #beta_trial = np.arctan((cost_cover / (n - cost_cover)))
+            beta_trial=1
+        else:
+            beta_trial = beta
+
+        # --- build circuit ---
+        qc = mixer_fixed_beta(current_graph, beta=beta_trial, p=p)
+
+        # --- compute probabilities ---
+        probs = qubit_one_probabilities(qc, shots=shots)
+
+        # safety stop
+        if np.max(probs) - np.min(probs) < tol:
+            break
+
+        # --- define "energy" ---
+        # simplest consistent choice: energy = probability of being 1
+        energies = probs
+
+        # pick vertex with MAX energy
+        v = int(np.argmax(energies))
+
+        # neighbors BEFORE removal
+        neighbors = list(current_graph.neighbors(v))
+
+        # add neighbors to vertex cover
+        vertex_cover += len(neighbors)
+
+        # remove v and its neighbors
+        nodes_to_remove = set(neighbors)
+        nodes_to_remove.add(v)
+        current_graph.remove_nodes_from(nodes_to_remove)
+
+        # relabel graph to [0, ..., n-1]
+        mapping = {old: new for new, old in enumerate(current_graph.nodes())}
+        current_graph = nx.relabel_nodes(current_graph, mapping)
+
+    return vertex_cover
 
 
+def Quadratic_quantum_greedy_maximum(
+    G,
+    C_builder,
+    beta_values_init,
+    p=1,
+    shots=None,
+):
+    """
+    Fully consistent quadratic greedy (MAX version):
+    - rebuild C at every step
+    - rebuild betas
+    - remap values correctly
+    - pick MAX energy vertex
+    - add neighbors to cover
+    - remove vertex + neighbors
+    """
+
+    G = nx.convert_node_labels_to_integers(G)
+    current_graph = G.copy()
+
+    vertex_cover = 0
+
+    # initialize values globally (same as minimum version)
+    values = beta_values_init.copy()
+
+    while current_graph.number_of_edges() > 0:
+
+        n = current_graph.number_of_nodes()
+
+        # --- rebuild parameters ---
+        betas = {i: Parameter(f"β_{i}") for i in range(n)}
+
+        # --- rebuild cost operator ---
+        
+        C = {i: 1 for i in current_graph.nodes()}
+        # --- remap values to current graph ---
+        values = {i: values.get(i, 0) for i in range(n)}
+
+        # --- build circuit ---
+        qc = mixer_from_graph(
+            current_graph,
+            {i: 1.0 for i in range(n)},
+            betas=betas,
+            p=p
+        )
+
+        best_energy = -np.inf
+        best_vertex = None
+
+        # --- quadratic selection ---
+        for v in range(n):
+
+            trial_vals = values.copy()
+            trial_vals[v] = 0
+
+            E = expectation_value_cost_shifted(
+                qc, betas, C, trial_vals, shots
+            )
+
+            if E > best_energy:
+                best_energy = E
+                best_vertex = v
+
+        # --- get neighbors BEFORE removal ---
+        neighbors = list(current_graph.neighbors(best_vertex))
+
+        # --- update values (keep consistency) ---
+        values[best_vertex] = 0
+
+        # --- add neighbors to cover ---
+        vertex_cover+=len(neighbors)
+
+        # --- remove v and neighbors ---
+        nodes_to_remove = set(neighbors)
+        nodes_to_remove.add(best_vertex)
+        current_graph.remove_nodes_from(nodes_to_remove)
+
+        # --- relabel graph ---
+        mapping = {old: new for new, old in enumerate(current_graph.nodes())}
+        current_graph = nx.relabel_nodes(current_graph, mapping)
+
+        # --- remap values AFTER relabel ---
+        values = {
+            mapping.get(old): val
+            for old, val in values.items()
+            if old in mapping
+        }
+
+    return vertex_cover
+
+import numpy as np
+import networkx as nx
+from qiskit.circuit import Parameter
+
+def Quadratic_quantum_greedy_minimum(
+    G,
+    C_builder,              # <-- pass a function, not fixed C
+    beta_values_init,
+    p=1,
+    shots=None,
+):
+    """
+    Fully consistent quadratic greedy:
+    - rebuild C at every step
+    - rebuild betas
+    - remap values correctly
+    """
+
+    G = nx.convert_node_labels_to_integers(G)
+    current_graph = G.copy()
+
+    vertex_cover = []
+
+    # initialize values globally
+    values = beta_values_init.copy()
+
+    while current_graph.number_of_edges() > 0:
+
+        n = current_graph.number_of_nodes()
+
+        # --- rebuild parameters ---
+        betas = {i: Parameter(f"β_{i}") for i in range(n)}
+
+        # --- rebuild cost operator ---
+        C = {i: 1 for i in current_graph.nodes()}
+
+        # --- remap values to current graph ---
+        values = {i: values.get(i, 0) for i in range(n)}
+
+        # --- build circuit ---
+        qc = mixer_from_graph(
+            current_graph,
+            {i: 1.0 for i in range(n)},
+            betas=betas,
+            p=p
+        )
+
+        best_energy = np.inf
+        best_vertex = None
+
+        # --- quadratic selection ---
+        for v in range(n):
+
+            trial_vals = values.copy()
+            trial_vals[v] = 0
+
+            E = expectation_value_cost_shifted(
+                qc, betas, C, trial_vals, shots
+            )
+
+            if E < best_energy:
+                best_energy = E
+                best_vertex = v
+
+        # --- update values (important if you want consistency) ---
+        values[best_vertex] = 0
+
+        # --- add to cover ---
+        vertex_cover.append(best_vertex)
+
+        # --- remove node ---
+        current_graph.remove_node(best_vertex)
+
+        # --- relabel graph ---
+        mapping = {old: new for new, old in enumerate(current_graph.nodes())}
+        current_graph = nx.relabel_nodes(current_graph, mapping)
+
+        # --- remap values AFTER relabel ---
+        values = {mapping.get(old, None): val
+                  for old, val in values.items()
+                  if old in mapping}
+
+    return len(vertex_cover)
 def Commuting_quantum_greedy_minimum(
     G,
     c,
     betas_1,
-    betas_2=None,
+    betas_2,
     p=1,
     shots=None,
 ):
